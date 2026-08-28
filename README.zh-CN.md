@@ -6,7 +6,7 @@ QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器�
 
 > English summary: QOpen is a curated personal resource launcher for Omarchy. It brings projects, files, documentation, web tools, TUI applications, commands and SSH destinations into one searchable interface with grouping, favorites and native editing.
 
-当前版本：**2.3.0**
+当前版本：**2.4.0**
 
 **文档：** [English](README.md) · [开发记录](DEVELOPMENT.md)
 
@@ -22,6 +22,8 @@ QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器�
 - 在适合时自动推导名称、id、默认分组和图标。
 - 资源行内支持收藏、复制目标、编辑和确认后删除。
 - JSON 写入使用文件锁、原子替换和自动的上一个可用版本备份。
+- 支持经过校验的备份恢复，以及显式的私有权限修复命令。
+- 编辑带空格或引号的命令参数时保持无损往返。
 - 可选状态栏组件：左键打开全部资源，右键打开收藏。
 - 独立 CLI 支持启动、检查、CRUD 和诊断。
 
@@ -54,7 +56,7 @@ QOpen 是系统自带 Omarchy Menu 的补充，而不是替代品。两个界面
 
 应用发现、软件包安装、系统更新、外观设置和电源操作等系统级功能应继续放在 Omarchy Menu；手动选择的项目、文件、参考资料和环境目标应放在 QOpen。把 Apps、Install、Update 或 System 完整复制到 QOpen 会造成不必要的功能重复。
 
-Omarchy Menu 中的 QOpen 子菜单只是可选的桥接入口，QOpen 状态栏组件同样可选。两个菜单都是使用独占键盘焦点的全屏 Overlay。通过 Omarchy Menu 操作启动 QOpen 是安全的，因为系统菜单会在执行操作前关闭。如果在一个菜单仍打开时调用另一个菜单的独立快捷键，两个 Overlay 可能同时保持挂载；切换前先按 `Escape` 关闭当前 Overlay 即可。
+Omarchy Menu 中的 QOpen 子菜单只是可选的桥接入口，QOpen 状态栏组件同样可选。两个菜单都是使用独占键盘焦点的全屏 Overlay。通过 Omarchy Menu 操作启动 QOpen 是安全的，因为系统菜单会在执行操作前关闭。QOpen 每次打开时也会请求 Omarchy Shell 隐藏 `omarchy.menu`，因此在系统菜单可见时调用独立快捷键，不会留下两个同时挂载的独占焦点 Overlay。
 
 ## 环境要求
 
@@ -70,7 +72,7 @@ QOpen 会在可用时使用 Omarchy 的启动 helper，并可通过以下命令�
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-2.3.0 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证。这些是已测试版本，并非严格版本锁定。
+2.4.0 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证。这些是已测试版本，并非严格版本锁定。
 
 ## 安装
 
@@ -296,6 +298,7 @@ Project 模式只列出目录，并通过底部按钮选择当前目录。File �
 - 每次修改都会验证完整目录；
 - 写入使用文件锁和同目录原子替换；
 - 上一个目录版本会保留为 `config.json.bak`；
+- 新状态文件使用私有权限（`0600`），已有文件可显式审计和修复权限；
 - QML 不会直接写入目录；
 - 个人资源数据不会自动同步到这个 GitHub 仓库。
 
@@ -322,6 +325,8 @@ $QOPEN add                     # 引导式新增
 $QOPEN edit [id]               # 引导式编辑
 $QOPEN remove [id]             # 确认后删除
 $QOPEN favorite <id> toggle    # 切换收藏状态
+$QOPEN recover                 # 校验并恢复 config.json.bak
+$QOPEN fix-permissions         # 将 QOpen 状态文件限制为 0600
 $QOPEN --edit                  # 使用配置的编辑器打开原始 JSON
 $QOPEN --doctor                # 验证依赖和全部条目
 $QOPEN --version
@@ -414,7 +419,19 @@ QOpen 会拒绝部分或格式错误的写入。检查：
 ~/.config/qopen/config.json.bak
 ```
 
-备份是上一次成功修改前的目录状态。
+备份是上一次成功修改前的目录状态。只能在校验通过后恢复：
+
+```bash
+~/.config/omarchy/plugins/qopen.launcher/bin/qopen recover
+```
+
+替换目录前，QOpen 会把当前无效文件保存为私有、带时间戳的
+`config.json.invalid-*` 快照。如果 `--doctor` 报告状态文件可被同组或其他用户读取，
+请显式修复权限：
+
+```bash
+~/.config/omarchy/plugins/qopen.launcher/bin/qopen fix-permissions
+```
 
 ### 开发热重载问题
 

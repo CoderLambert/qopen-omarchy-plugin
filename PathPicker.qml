@@ -18,6 +18,11 @@ FocusScope {
   property bool loading: false
   property bool truncated: false
   property string errorText: ""
+  property int requestSerial: 0
+  property int activeRequestSerial: 0
+  property int pendingRequestSerial: 0
+  property string pendingPath: ""
+  property bool pendingShowHidden: false
 
   property color foreground: Color.menu.text
   property color background: Color.menu.background
@@ -50,33 +55,53 @@ FocusScope {
   function closePicker() {
     root.opened = false
     root.loading = false
+    root.requestSerial++
+    root.pendingPath = ""
+    root.pendingRequestSerial = 0
+    if (browseProcess.running) browseProcess.running = false
     root.canceled()
   }
 
   function loadPath(path) {
-    if (!root.opened || root.loading || !root.backendPath) return
+    if (!root.opened || !root.backendPath) return
     var requested = String(path || "").trim()
     if (!requested) requested = Quickshell.env("HOME")
+    root.requestSerial++
+    root.pendingRequestSerial = root.requestSerial
+    root.pendingPath = requested
+    root.pendingShowHidden = root.showHidden
     root.loading = true
     root.errorText = ""
     root.selectedPath = ""
     root.selectedKind = ""
     entryList.currentIndex = -1
+    if (!browseProcess.running) root.startPendingRequest()
+  }
+
+  function startPendingRequest() {
+    if (!root.opened || !root.pendingPath || browseProcess.running) return
+    var requested = root.pendingPath
+    var hidden = root.pendingShowHidden
+    root.activeRequestSerial = root.pendingRequestSerial
+    root.pendingPath = ""
+    root.pendingRequestSerial = 0
     browseProcess.command = [root.backendPath, "api", "browse-path", "--path", requested,
-      "--type", root.resourceType]
-    if (root.showHidden) browseProcess.command.push("--show-hidden")
+      "--type", root.resourceType, "--request-id", String(root.activeRequestSerial)]
+    if (hidden) browseProcess.command.push("--show-hidden")
     browseProcess.running = true
   }
 
   function consumeResponse(raw) {
-    root.loading = false
     try {
       var response = JSON.parse(String(raw || "{}"))
       if (!response.ok) {
-        root.errorText = String(response.error || "Could not read this directory")
+        if (root.activeRequestSerial === root.requestSerial)
+          root.errorText = String(response.error || "Could not read this directory")
         return
       }
       var result = response.result || ({})
+      if (!root.opened || Number(result.requestId) !== root.requestSerial) return
+      root.loading = false
       root.currentPath = String(result.path || "")
       root.parentPath = String(result.parent || "")
       root.truncated = result.truncated === true
@@ -95,7 +120,8 @@ FocusScope {
       }
       if (entryModel.count > 0) root.selectIndex(0)
     } catch (e) {
-      root.errorText = "Invalid directory response: " + e
+      if (root.activeRequestSerial === root.requestSerial)
+        root.errorText = "Invalid directory response: " + e
     }
     Qt.callLater(function() { entryList.forceActiveFocus() })
   }
@@ -142,7 +168,7 @@ FocusScope {
     }
     if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_H) {
       root.showHidden = !root.showHidden
-      root.loadPath(root.currentPath)
+      root.loadPath(root.currentPath || pathField.text || Quickshell.env("HOME"))
       event.accepted = true
       return
     }
@@ -175,8 +201,8 @@ FocusScope {
   Rectangle {
     id: pickerCard
     anchors.centerIn: parent
-    width: Math.max(Style.space(560), parent.width - Style.space(44))
-    height: Math.max(Style.space(480), parent.height - Style.space(44))
+    width: Math.max(0, Math.min(Style.space(1040), parent.width - Style.space(44)))
+    height: Math.max(0, Math.min(Style.space(720), parent.height - Style.space(44)))
     radius: Style.cornerRadius
     color: root.background
     border.width: 1
@@ -465,7 +491,16 @@ FocusScope {
       onStreamFinished: root.consumeResponse(text)
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0 && root.loading) root.loading = false
+      if (!root.opened) return
+      if (root.pendingPath) {
+        Qt.callLater(root.startPendingRequest)
+        return
+      }
+      if (root.activeRequestSerial === root.requestSerial && root.loading) {
+        root.loading = false
+        if (exitCode !== 0 && !root.errorText)
+          root.errorText = "Could not read this directory"
+      }
     }
   }
 }

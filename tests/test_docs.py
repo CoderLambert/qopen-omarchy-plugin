@@ -105,8 +105,8 @@ class ReadmeParityTests(unittest.TestCase):
         english = read(ENGLISH_README)
         chinese = read(CHINESE_README)
 
-        self.assertIn("Current release: **2.3.0**", english)
-        self.assertIn("当前版本：**2.3.0**", chinese)
+        self.assertIn("Current release: **2.4.0**", english)
+        self.assertIn("当前版本：**2.4.0**", chinese)
         self.assertEqual(english.count("docs/assets/qopen-usage.png"), 1)
         self.assertEqual(chinese.count("docs/assets/qopen-usage.png"), 1)
 
