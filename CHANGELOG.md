@@ -16,6 +16,7 @@ All notable user-facing changes to QOpen are documented here.
   traceable patch release.
 - The maintainer workflow now promotes changes through `dev`, `uat` and `main`
   before tagging a release.
+- GitHub CI actions now target the current Node 24-based major versions.
 
 ## [2.4.0] - 2026-08-28
 
