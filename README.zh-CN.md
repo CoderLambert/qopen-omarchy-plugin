@@ -6,6 +6,19 @@ QOpen 不是应用索引器，也不会扫描整个 home 目录。目录中的�
 
 **当前版本：2.3.0** · [English README](README.md) · [开发记录](DEVELOPMENT.md)
 
+## 为什么需要 QOpen
+
+Omarchy 本身已经很擅长启动已安装的桌面应用和 Shell 命令。QOpen 解决的是应用索引不适合表达的那一层个人资源：
+
+- 每天都会进入的项目目录；
+- 需要用终端编辑器打开的配置文件；
+- 经过筛选、值得长期保留的框架或库文档；
+- 希望有清晰名称和分组的 TUI；
+- 显式、安全的命令入口；
+- 与同一环境其他资源放在一起的 SSH 目标。
+
+目录始终保持小而明确：QOpen 不扫描整个 home 目录，也不会静默加入资源。
+
 ## 使用截图
 
 ![QOpen 使用截图：按 React 搜索并按集合查看资源](docs/assets/qopen-usage.png)
@@ -25,6 +38,22 @@ QOpen 不是应用索引器，也不会扫描整个 home 目录。目录中的�
 - 配置写入使用锁、备份和同目录原子替换，避免留下半截 JSON。
 - 可选状态栏组件：左键打开全部资源，右键打开收藏。
 - 保留 CLI，方便脚本、批量维护和故障诊断。
+
+## 环境要求
+
+- 支持当前 Omarchy Shell 插件命令的 Omarchy。
+- Omarchy 提供的 Quickshell。
+- Python 3.10 或更高版本。
+- 用于显示内置图标的 Nerd Font。
+- `wl-clipboard`（提供 `wl-paste` 和 `wl-copy`），用于剪贴板操作。
+
+QOpen 会优先使用 Omarchy 提供的启动 helper，可以通过下面的命令检查当前完整环境：
+
+```bash
+~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
+```
+
+2.3.0 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证；这些是已测试版本，不是严格版本锁定。
 
 ## 安装
 
@@ -236,6 +265,7 @@ project 模式只显示目录，并使用底部按钮选择当前目录；file �
       "name": "React Documentation",
       "type": "web",
       "group": "frameworks",
+      "icon": "",
       "description": "Official React guides and API reference",
       "target": "https://react.dev/learn",
       "mode": "browser",
@@ -246,6 +276,7 @@ project 模式只显示目录，并使用底部按钮选择当前目录；file �
       "name": "My App",
       "type": "project",
       "group": "projects",
+      "icon": "󰉋",
       "target": "~/Code/my-app"
     },
     {
@@ -306,11 +337,52 @@ $QOPEN add project \
 
 `api` 子命令是 QML 使用的机器接口，当前主要服务于插件自身，暂不承诺跨版本的公共稳定性。
 
-## 崩溃规避与排障
+## 架构与安全
 
-2.2 版本曾尝试使用 Qt `FileDialog`/`FolderDialog`。在 Omarchy Shell 的共享 Quickshell 进程中，这会把 GTK、GIO 和 GVFS 引入原生文件对话框路径。实测打开选择器时出现 Quickshell 退出，GLib 报告 `failed to allocate 4 bytes`；系统并没有内存耗尽，配置也没有在崩溃前被写入。
+```text
+Omarchy 菜单 / 快捷键 / 状态栏
+                 |
+                 v
+             QOpen.qml
+                 |
+       +---------+----------+
+       |                    |
+ResourceEditor.qml     PathPicker.qml
+       |                    |
+       +---------+----------+
+                 | 仅传 argv
+                 v
+              bin/qopen
+                 |
+         配置锁 + 完整校验
+                 |
+                 v
+       ~/.config/qopen/config.json
+```
 
-2.3 已移除 `QtQuick.Dialogs`，改为一次性 `os.scandir()` 加内嵌路径浏览器，不注册 GIO/GVFS 目录监视器。这样 file/project 仍能浏览本地路径，同时避免原生对话框故障带走整个 Shell。完整证据和验证记录见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+QML 负责界面、焦点和交互；Python 负责目录枚举、规范化、完整配置校验、持久化和进程分发。
+
+内嵌路径浏览器刻意避开 Qt `FileDialog`、GTK、GIO 和 GVFS。QOpen 运行在共享的 Omarchy Shell 进程内，因此原生文件选择器一旦故障可能连带终止整个桌面 Shell。2.2 曾短暂使用原生对话框；2.3 在复现 Quickshell 崩溃后将其移除。证据、事故复盘和发布验证记录见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+命令始终以参数数组传递；QML 不会把资源值拼接成 shell 命令执行。
+
+## 更新和卸载
+
+更新通过 Git 安装的插件：
+
+```bash
+omarchy plugin update qopen.launcher --yes
+```
+
+卸载插件：
+
+```bash
+omarchy plugin remove qopen.launcher --yes
+```
+
+卸载不会删除 `~/.config/qopen/config.json`，重新安装后仍可继续使用个人目录。
+
+## 排障
 
 ### QOpen 不显示
 
@@ -322,11 +394,13 @@ omarchy restart shell
 
 ### 资源无法打开
 
+运行 doctor 并检查失败的资源：
+
 ```bash
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-project/file 类型请确认展开后的路径存在；tui/command 类型请确认命令的第一个可执行文件在 `PATH` 中；web 类型请确认目标是完整的 `http://` 或 `https://` 地址。
+project/file 类型请确认展开后的路径存在；tui/command 类型请确认命令的第一个可执行文件在 `PATH` 中。
 
 ### 配置损坏或新增失败
 
@@ -339,16 +413,17 @@ QOpen 会拒绝部分或格式错误的写入。先检查：
 
 备份文件是上一次成功修改前的目录状态。若新增失败，优先检查 id 是否重复、id 是否含有大写或空格、目标字段是否已填写，以及当前用户是否有目标路径的访问权限。
 
-### 更新和卸载
+### 开发热重载问题
+
+Omarchy 通常会热重载 `~/.config/omarchy/plugins` 下的文件。多文件修改时，建议先一次性同步全部文件，再重启共享 Shell：
 
 ```bash
-omarchy plugin update qopen.launcher --yes
-omarchy plugin remove qopen.launcher --yes
+omarchy restart shell
 ```
 
-卸载不会删除 `~/.config/qopen/config.json`，重新安装后仍可继续使用个人目录。
+这样可以避免插件文件处于中间状态时反复重建插件图。
 
-## 开发与许可
+## 开发
 
 源码结构、版本演进、原生文件选择器事故、测试流程和发布记录见 [DEVELOPMENT.md](DEVELOPMENT.md)。用户可见变更见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -358,4 +433,6 @@ omarchy plugin remove qopen.launcher --yes
 python -m unittest discover -s tests -v
 ```
 
-本项目使用 [MIT License](LICENSE)。
+## 许可
+
+[MIT](LICENSE) © 2026 CoderLambert
