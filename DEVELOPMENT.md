@@ -2,7 +2,7 @@
 
 本文记录 QOpen 从个人命令行启动器演进为 Omarchy Shell 插件的过程、关键技术
 决策、事故复盘、验证方式和后续维护约定。用户安装与使用说明请查看
-[README.md](README.md)。
+[README.md](README.md) 或 [README.zh-CN.md](README.zh-CN.md)。
 
 ## 1. 产品边界
 

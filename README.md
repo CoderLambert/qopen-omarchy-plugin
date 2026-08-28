@@ -13,6 +13,8 @@ something you chose to keep, describe, group and find again.
 
 Current release: **2.3.0**
 
+**Documentation:** [简体中文](README.zh-CN.md) · [Development record](DEVELOPMENT.md)
+
 ## Highlights
 
 - Native Omarchy Shell and Quickshell interface using live theme tokens.
@@ -164,6 +166,14 @@ omarchy-shell shell toggle qopen.launcher '{"action":"add"}'
 omarchy-shell shell toggle qopen.launcher \
   '{"action":"add","type":"project","browse":true}'
 ```
+
+### Usage preview
+
+![QOpen grouped search showing React resources](docs/assets/qopen-usage.png)
+
+The example shows a `react` search with curated collections on the left and
+keyboard-friendly resource actions on the right. The screenshot is cropped to
+the QOpen panel so it does not include the surrounding desktop.
 
 ### Main interface keys
 
