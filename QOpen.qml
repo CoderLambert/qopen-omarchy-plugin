@@ -15,8 +15,12 @@ Item {
 
   readonly property string pluginId: (manifest && manifest.id) || "qopen.launcher"
   readonly property string pluginDir: (manifest && manifest.__sourceDir) || ""
-  readonly property string backendPath: pluginDir + "/bin/qopen"
+  readonly property string backendPath: pluginDir ? pluginDir + "/bin/qopen" : ""
   readonly property string configPath: Quickshell.env("HOME") + "/.config/qopen/config.json"
+
+  onPluginDirChanged: {
+    if (root.pluginDir) root.requestCatalogReload()
+  }
 
   property bool opened: false
   property string query: ""

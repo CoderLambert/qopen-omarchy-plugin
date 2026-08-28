@@ -319,6 +319,17 @@ class QOpenBackendTests(unittest.TestCase):
             qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
             self.assertIn('catalogProcess.command = [root.backendPath, "api", "catalog"]', qopen_source)
 
+    def test_catalog_waits_for_the_host_to_inject_the_plugin_directory(self) -> None:
+        qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'readonly property string backendPath: pluginDir ? pluginDir + "/bin/qopen" : ""',
+            qopen_source,
+        )
+        self.assertIn("onPluginDirChanged:", qopen_source)
+        self.assertIn("if (root.pluginDir) root.requestCatalogReload()", qopen_source)
+        self.assertNotIn('readonly property string backendPath: pluginDir + "/bin/qopen"', qopen_source)
+
     def test_fix_permissions_secures_all_state_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

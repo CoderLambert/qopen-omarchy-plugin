@@ -32,6 +32,8 @@ All notable user-facing changes to QOpen are documented here.
 - Added visible failure feedback for target checks, clipboard reads and clipboard writes.
 - Prevented a completed directory request from replacing a newer PathPicker state.
 - Prevented schema-invalid but syntactically valid JSON from being rendered as a catalog.
+- Deferred the initial catalog process until Omarchy Shell has injected the plugin directory,
+  avoiding an erroneous `/bin/qopen` launch during asynchronous plugin loading.
 
 ## [2.3.0] - 2026-08-28
 
