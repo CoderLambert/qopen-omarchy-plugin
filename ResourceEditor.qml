@@ -72,6 +72,22 @@ Item {
   signal cancelRequested()
   signal submitRequested(string action, string payload, string originalPayload)
 
+  component FormTextField: TextField {
+    foreground: root.foreground
+    accent: root.accent
+    background: Rectangle {
+      color: Style.controlFill(
+        parent.activeFocus,
+        parent.hovered || parent.hasCursor,
+        root.foreground,
+        root.accent
+      )
+      radius: root.radius
+      border.width: 1
+      border.color: parent.activeFocus ? root.accent : root.borderColor
+    }
+  }
+
   function slugify(value) {
     var slug = String(value || "").toLowerCase()
       .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
@@ -540,12 +556,11 @@ Item {
             width: (parent.width - parent.spacing) * 0.58
             spacing: Style.space(6)
             Text { text: "Name *"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-            TextField {
+            FormTextField {
               id: nameField
               width: parent.width
               text: root.nameValue
               placeholderText: "Resource name"
-              foreground: root.foreground
               onTextChanged: {
                 root.nameValue = text
                 if (!root.idTouched) root.idValue = root.slugify(text)
@@ -558,11 +573,10 @@ Item {
             width: parent.width - parent.spacing - (parent.width - parent.spacing) * 0.58
             spacing: Style.space(6)
             Text { text: "Group *"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-            TextField {
+            FormTextField {
               width: parent.width
               text: root.groupValue
               placeholderText: root.defaultGroups[root.selectedType]
-              foreground: root.foreground
               onTextChanged: { root.groupValue = text; root.markDirty() }
             }
           }
@@ -595,12 +609,13 @@ Item {
           Row {
             width: parent.width
             spacing: Style.space(8)
-            TextField {
+            FormTextField {
               id: primaryField
-              width: (parent.width - Style.space(12)) * 0.58
+              width: parent.width - pasteButton.width - checkButton.width
+                - (browseButton.visible ? browseButton.width + parent.spacing : 0)
+                - parent.spacing * 2
               text: root.primaryValue()
               placeholderText: root.primaryPlaceholder()
-              foreground: root.foreground
               onTextChanged: {
                 root.setPrimaryValue(text)
                 root.targetStatus = ""
@@ -655,11 +670,10 @@ Item {
           width: parent.width
           spacing: Style.space(6)
           Text { text: "Description"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-          TextField {
+          FormTextField {
             width: parent.width
             text: root.descriptionValue
             placeholderText: "Why this resource is useful"
-            foreground: root.foreground
             onTextChanged: { root.descriptionValue = text; root.markDirty() }
           }
         }
@@ -737,8 +751,8 @@ Item {
               width: (parent.width - parent.spacing) * 0.65
               spacing: Style.space(6)
               Text { text: "Stable ID"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-              TextField {
-                width: parent.width; text: root.idValue; placeholderText: root.slugify(root.nameValue); foreground: root.foreground
+              FormTextField {
+                width: parent.width; text: root.idValue; placeholderText: root.slugify(root.nameValue)
                 onTextEdited: root.idTouched = true
                 onTextChanged: { root.idValue = text; root.markDirty() }
               }
@@ -747,7 +761,7 @@ Item {
               width: parent.width - parent.spacing - (parent.width - parent.spacing) * 0.65
               spacing: Style.space(6)
               Text { text: "Icon"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-              TextField { width: parent.width; text: root.iconValue; placeholderText: root.defaultIcons[root.selectedType]; foreground: root.foreground; onTextChanged: { root.iconValue = text; root.markDirty() } }
+              FormTextField { width: parent.width; text: root.iconValue; placeholderText: root.defaultIcons[root.selectedType]; onTextChanged: { root.iconValue = text; root.markDirty() } }
             }
           }
 
@@ -755,14 +769,14 @@ Item {
             visible: root.selectedType === "web"
             width: parent.width; spacing: Style.space(6)
             Text { text: "Window focus pattern"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-            TextField { width: parent.width; text: root.focusValue; placeholderText: "Optional app window match"; foreground: root.foreground; onTextChanged: { root.focusValue = text; root.markDirty() } }
+            FormTextField { width: parent.width; text: root.focusValue; placeholderText: "Optional app window match"; onTextChanged: { root.focusValue = text; root.markDirty() } }
           }
 
           Column {
             visible: root.selectedType === "file"
             width: parent.width; spacing: Style.space(6)
             Text { text: "Editor command"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-            TextField { width: parent.width; text: root.editorValue; placeholderText: "Uses the default editor when empty"; foreground: root.foreground; onTextChanged: { root.editorValue = text; root.markDirty() } }
+            FormTextField { width: parent.width; text: root.editorValue; placeholderText: "Uses the default editor when empty"; onTextChanged: { root.editorValue = text; root.markDirty() } }
           }
         }
 
