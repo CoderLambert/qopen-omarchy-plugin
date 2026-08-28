@@ -4,8 +4,9 @@ QOpen is a personal resource launcher for [Omarchy](https://omarchy.org/). It
 puts projects, files, documentation, web tools, terminal applications, commands
 and SSH destinations behind one searchable, keyboard-first interface.
 
-Unlike an application launcher, QOpen is intentionally curated: every item is
-something you chose to keep, describe, group and find again.
+Unlike an application launcher, QOpen is intentionally curated. A new catalog
+starts with a few generic examples; every resource can then be kept, edited,
+regrouped or removed by you.
 
 > 中文简介：QOpen 是 Omarchy 上的个人统一资源启动层。它不是应用索引，
 > 而是把项目目录、文件、常用文档、前端生态网站、TUI、命令和 SSH 目标集中到
@@ -20,6 +21,7 @@ Current release: **2.4.1**
 - Native Omarchy Shell and Quickshell interface using live theme tokens.
 - Search across name, description, stable id, type, group, target and command.
 - Collections with counts, recommended ordering and a dedicated favorites view.
+- A small first-run catalog with useful examples across common resource types.
 - Six resource types: web, project, file, TUI, command and SSH.
 - Single-page add/edit form with type-aware fields and inline validation.
 - Built-in file and directory browser that does not use GTK/GVFS file dialogs.
@@ -45,7 +47,8 @@ QOpen covers the layer that application indexes do not model cleanly:
 - an SSH destination grouped with the rest of an environment.
 
 The catalog remains small, portable and understandable. QOpen never crawls your
-home directory or silently adds resources.
+home directory. It creates starter examples only when the catalog is missing
+and never inserts them into an existing catalog.
 
 ## Relationship to Omarchy Menu
 
@@ -290,6 +293,24 @@ The default catalog is stored at:
 ```text
 ~/.config/qopen/config.json
 ```
+
+### First-run starter resources
+
+When the catalog does not exist, the first QOpen launch creates six ordinary,
+editable resources:
+
+| Resource | Type | Purpose |
+| --- | --- | --- |
+| Omarchy | `web` | Open the official Omarchy website and documentation |
+| GitHub | `web` | Open repositories, issues, pull requests and releases |
+| Home Directory | `project` | Open a terminal in `~` |
+| Omarchy Shell Config | `file` | Edit `~/.config/omarchy/shell.json` |
+| btop | `tui` | Monitor CPU, memory, disks and processes |
+| Fastfetch | `command` | Show a concise system information summary |
+
+Existing catalogs are never seeded or modified. The starter resources behave
+like any other item and can be edited or removed. QOpen does not create an SSH
+example because no host is both useful and valid for every user.
 
 Example:
 

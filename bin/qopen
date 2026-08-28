@@ -48,11 +48,74 @@ DEFAULT_GROUPS = {
     "command": "system",
     "ssh": "infra",
 }
+DEFAULT_ITEMS = (
+    {
+        "id": "omarchy",
+        "name": "Omarchy",
+        "type": "web",
+        "group": "reference",
+        "icon": "󰖟",
+        "description": "Official Omarchy website and documentation",
+        "target": "https://omarchy.org/",
+        "mode": "browser",
+    },
+    {
+        "id": "github",
+        "name": "GitHub",
+        "type": "web",
+        "group": "dev",
+        "icon": "󰊤",
+        "description": "Repositories, issues, pull requests and releases",
+        "target": "https://github.com/",
+        "mode": "browser",
+    },
+    {
+        "id": "home",
+        "name": "Home Directory",
+        "type": "project",
+        "group": "projects",
+        "icon": "󰉋",
+        "description": "Open a terminal in your home directory",
+        "target": "~",
+    },
+    {
+        "id": "omarchy-shell-config",
+        "name": "Omarchy Shell Config",
+        "type": "file",
+        "group": "config",
+        "icon": "󰈙",
+        "description": "Edit Omarchy Shell, bar and plugin settings",
+        "target": "~/.config/omarchy/shell.json",
+    },
+    {
+        "id": "btop",
+        "name": "btop",
+        "type": "tui",
+        "group": "tools",
+        "icon": "",
+        "description": "Monitor CPU, memory, disks and processes",
+        "command": ["btop"],
+    },
+    {
+        "id": "fastfetch",
+        "name": "Fastfetch",
+        "type": "command",
+        "group": "system",
+        "icon": "󰘳",
+        "description": "Show a concise system information summary",
+        "command": ["fastfetch"],
+        "terminal": True,
+    },
+)
 MENU_WIDTH = 720
 MENU_MAX_HEIGHT = 640
 MENU_SETTLE_SECONDS = 0.08
 PATH_BROWSE_LIMIT = 1000
 GROUP_META = {
+    "projects": ("󰉋", "Projects", "Directories opened in a terminal"),
+    "config": ("󰒓", "Configuration", "Frequently edited configuration files"),
+    "tools": ("", "Terminal Tools", "Interactive terminal applications"),
+    "system": ("󰍛", "System", "Safe local utility commands"),
     "react-editors": ("󰨞", "React · Rich Text", "Editors for custom product content workflows"),
     "react-motion": ("󰔎", "React · Motion", "Animation, transitions and spring interactions"),
     "react-icons": ("󰀻", "React · Icons", "Consistent SVG icons and broad icon catalogs"),
@@ -381,7 +444,11 @@ def launch_terminal(path: Path) -> None:
 
 # Configuration and safe persistence
 def default_config() -> dict[str, Any]:
-    return {"version": 1, "defaults": {"editor": "nvim", "webMode": "app"}, "items": []}
+    return {
+        "version": 1,
+        "defaults": {"editor": "nvim", "webMode": "app"},
+        "items": copy.deepcopy(list(DEFAULT_ITEMS)),
+    }
 
 
 def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefix: str) -> None:
@@ -1368,6 +1435,7 @@ def api_cli(argv: list[str]) -> int:
                                                   args.request_id))
             return 0
         if args.action == "catalog":
+            ensure_config()
             api_emit(True, action="catalog", result=read_config_unlocked())
             return 0
         if args.action == "recover":
