@@ -2,6 +2,21 @@
 
 All notable user-facing changes to QOpen are documented here.
 
+## [2.4.1] - 2026-08-28
+
+### Added
+
+- Root `preview.png` for the Omarchy Plugin Marketplace, generated from the
+  documented QOpen interface screenshot.
+- Release-contract coverage that binds Git release tags to the manifest version.
+
+### Changed
+
+- The complete marketplace-ready repository state is now published as one
+  traceable patch release.
+- The maintainer workflow now promotes changes through `dev`, `uat` and `main`
+  before tagging a release.
+
 ## [2.4.0] - 2026-08-28
 
 ### Added

@@ -359,17 +359,33 @@ omarchy restart shell
 
 ## 10. 发布流程
 
+### 分支职责
+
+- `dev`：日常集成分支，功能分支首先合并到这里。
+- `uat`：用户验收分支，只接收已通过集成测试的 `dev` 提升。
+- `main`：稳定发布分支，只接收已通过 UAT 的版本。
+
+新建版本按 `feature/* → dev → uat → main` 推进。这三个长期分支在
+每个版本发布完成时应指向同一个稳定提交，之后再从 `dev` 开始新的开发周期。
+
+### 版本发布
+
 1. 更新 `manifest.json` 版本。
 2. 更新 `VERSION` 常量。
 3. 更新 `CHANGELOG.md`。
 4. 检查中英文 README 的当前版本、章节顺序、示例与兼容性说明；
-   `tests/test_docs.py` 会阻止双语文档结构和命令示例再次漂移。
+   `tests/test_docs.py` 会阻止双语文档结构、命令示例和公开版本再次漂移。
 5. 运行 manifest、CLI、目录 API 和 UI 验证。
 6. 搜索绝对路径、凭据、测试数据和生成文件。
 7. 确认源码与用户安装副本一致。
-8. 创建 Git commit。
-9. 推送 GitHub。
-10. 验证公开仓库、默认分支和 clone URL。
+8. 通过 PR 将验收提交合并到 `main`。
+9. 在 `main` 的合并提交上创建注释标签 `v<manifest version>`。
+10. 推送标签并创建同名 GitHub Release。
+11. 确认 tag、manifest、CLI、中英文 README 和 CHANGELOG 版本一致。
+12. 使用该 tag 指向的精确 commit 进行市场提交或更新验证。
+
+GitHub tag 构建会读取 `GITHUB_REF_NAME`；如果 tag 不等于
+`v<manifest version>`，发布契约测试必须失败。已公开的 tag 不能移动或覆盖。
 
 ## 11. 已知限制与后续方向
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import unittest
 from pathlib import Path
@@ -8,6 +10,8 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[1]
 ENGLISH_README = REPOSITORY / "README.md"
 CHINESE_README = REPOSITORY / "README.zh-CN.md"
+CHANGELOG = REPOSITORY / "CHANGELOG.md"
+MANIFEST = REPOSITORY / "manifest.json"
 MARKETPLACE_PREVIEW = REPOSITORY / "preview.png"
 README_SCREENSHOT = REPOSITORY / "docs" / "assets" / "qopen-usage.png"
 
@@ -106,15 +110,24 @@ class ReadmeParityTests(unittest.TestCase):
     def test_bilingual_readmes_use_the_same_release_and_screenshot(self) -> None:
         english = read(ENGLISH_README)
         chinese = read(CHINESE_README)
+        version = json.loads(read(MANIFEST))["version"]
 
-        self.assertIn("Current release: **2.4.0**", english)
-        self.assertIn("当前版本：**2.4.0**", chinese)
+        self.assertIn(f"Current release: **{version}**", english)
+        self.assertIn(f"当前版本：**{version}**", chinese)
+        self.assertIn(f"## [{version}]", read(CHANGELOG))
         self.assertEqual(english.count("docs/assets/qopen-usage.png"), 1)
         self.assertEqual(chinese.count("docs/assets/qopen-usage.png"), 1)
 
     def test_marketplace_preview_matches_the_documented_interface(self) -> None:
         self.assertTrue(MARKETPLACE_PREVIEW.is_file())
         self.assertEqual(MARKETPLACE_PREVIEW.read_bytes(), README_SCREENSHOT.read_bytes())
+
+    def test_release_tag_matches_the_manifest_version(self) -> None:
+        if os.environ.get("GITHUB_REF_TYPE") != "tag":
+            return
+
+        version = json.loads(read(MANIFEST))["version"]
+        self.assertEqual(os.environ.get("GITHUB_REF_NAME"), f"v{version}")
 
 
 if __name__ == "__main__":
