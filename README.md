@@ -11,7 +11,7 @@ something you chose to keep, describe, group and find again.
 > 而是把项目目录、文件、常用文档、前端生态网站、TUI、命令和 SSH 目标集中到
 > 一个支持搜索、分组、收藏与原生编辑的界面中。
 
-Current release: **2.4.2**
+Current release: **2.4.1**
 
 **Documentation:** [简体中文](README.zh-CN.md) · [Development record](DEVELOPMENT.md)
 
@@ -94,7 +94,7 @@ environment with:
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-The 2.4.2 release was developed and verified on Omarchy 4.0.1, Quickshell
+The 2.4.1 release was developed and verified on Omarchy 4.0.1, Quickshell
 0.3.1 and Qt 6.11.2. These are tested versions, not strict pins.
 
 ## Installation
