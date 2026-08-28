@@ -2,7 +2,7 @@
 
 All notable user-facing changes to QOpen are documented here.
 
-## Unreleased
+## [2.5.0] - 2026-08-28
 
 ### Added
 
