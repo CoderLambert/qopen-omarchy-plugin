@@ -12,6 +12,7 @@ ENGLISH_README = REPOSITORY / "README.md"
 CHINESE_README = REPOSITORY / "README.zh-CN.md"
 CHANGELOG = REPOSITORY / "CHANGELOG.md"
 MANIFEST = REPOSITORY / "manifest.json"
+AGENT_GUIDE = REPOSITORY / "AGENTS.md"
 MARKETPLACE_PREVIEW = REPOSITORY / "preview.png"
 README_SCREENSHOT = REPOSITORY / "docs" / "assets" / "qopen-usage.png"
 
@@ -128,6 +129,24 @@ class ReadmeParityTests(unittest.TestCase):
 
         version = json.loads(read(MANIFEST))["version"]
         self.assertEqual(os.environ.get("GITHUB_REF_NAME"), f"v{version}")
+
+    def test_ai_collaboration_guide_keeps_critical_contracts(self) -> None:
+        guide = read(AGENT_GUIDE)
+        required_contracts = (
+            "feature/* -> dev -> uat -> main",
+            "QOPEN_CONFIG",
+            "QtQuick.Dialogs",
+            "omarchy plugin validate .",
+            "omarchy plugin update qopen.launcher",
+            "~/.config/qopen/config.json",
+            "v<manifest version>",
+            "## 11. Installation and developer synchronization",
+            "## 14. AI collaboration behavior",
+        )
+
+        for contract in required_contracts:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, guide)
 
 
 if __name__ == "__main__":
