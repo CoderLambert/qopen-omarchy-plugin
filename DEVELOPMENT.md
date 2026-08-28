@@ -112,6 +112,48 @@ React 富文本、动画、图标、状态、表单和交互能力分组。
 
 该版本没有引入新数据 schema。2.3 的配置可以直接使用，不需要迁移。
 
+### v2.5：首次目录与市场发布准备
+
+2.5 将首次启动资源收敛为六项通用示例，并统一 `main`、`uat`、`dev`、tag、
+双语 README、预览图和 AI 协作流程，为 Omarchy Plugin Marketplace 提交建立精确
+commit 基线。
+
+### v2.5.1：市场审核安全加固
+
+市场审核在 `bcaf8f047fc581019cecb29f1689752e0303c89f` 指出了两个阻塞项：状态文件
+仍通过普通路径操作，QML 仍直接使用 `FileView` 和无界 `StdioCollector`。2.5.1
+据此重构完整安全边界：
+
+- 从 `/` 开始逐级使用目录描述符和 `O_NOFOLLOW` 打开状态目录；
+- 配置、备份和恢复快照只通过可信目录 FD 与相对名称访问；
+- 拒绝 symlink、hardlink、FIFO、设备、Socket、目录和非当前用户文件；
+- 取消路径锁文件，直接对可信状态目录 FD 使用带截止时间的非阻塞 `flock`；
+- 使用同一次已验证读取的原始 bytes 创建备份，再执行 descriptor-relative 原子替换；
+- 配置读取、API 输入输出、helper 输出、目录扫描数量和扫描时间都具有硬上限；
+- 删除 QML `FileView` 与全部 `StdioCollector`，统一通过 `BoundedProcess.qml`
+  读取单行 JSON，并执行真实 TERM 到 KILL 截止时间；
+- 禁用无法参与锁、校验、备份与原子替换协议的原始 `$QOPEN --edit` 入口；
+- 增加父目录和文件 symlink、FIFO、hardlink、超限输入、锁超时、无界剪贴板输出和
+  并发路径替换攻击测试。
+
+安全保证针对路径重定向、特殊文件阻塞、竞态写出和资源耗尽。相同 Unix uid 的恶意
+进程本身拥有用户文件权限，因此不能声称阻止它直接替换合法普通文件或插件代码。
+
+#### v2.5.1 实施与验收计划
+
+| 阶段 | 实施内容 | 完成标准 |
+| --- | --- | --- |
+| 1. 威胁建模 | 固定审核 commit、枚举配置/备份/锁/QML 输出入口与同 uid 边界 | 每个审核意见都有明确代码入口和测试映射 |
+| 2. 状态目录加固 | 从 `/` 逐级无跟随打开目录，校验最终目录和状态文件，移除路径锁文件 | symlink、hardlink、FIFO、设备及越权权限全部 fail closed |
+| 3. 原子生命周期 | 在同一目录 FD 与锁内完成读取、备份、临时写入、替换和恢复 | 备份来自同一次已验证读取，文件和目录均完成 `fsync` |
+| 4. 资源边界 | 限制目录、item、API 输入输出、helper 输出与扫描工作量 | 超限输入快速失败，不进入 QML 或形成无界内存占用 |
+| 5. QML 进程协议 | 删除 `FileView`/`StdioCollector`，统一单行 JSON、请求 id、截止时间和 TERM→KILL | 后端挂起、重复响应、无响应和陈旧响应均得到确定处理 |
+| 6. 对抗验证 | 覆盖预置路径、并发替换、锁占用、特殊文件、超大输出和超时 helper | 自动测试无挂起、外部哨兵文件不变、真实个人目录哈希不变 |
+| 7. 发布门禁 | 校验 manifest、Python、全部 QML、插件规范、双语文档与安装运行时 | CI 与本机门禁通过，UAT 后以精确 HEAD 请求市场复审 |
+
+版本号、文档和实现一起提升到 `2.5.1`。该修复先通过 hotfix PR 进入 `main`；在用户
+运行验收和市场复审完成前，不创建或移动 release tag，也不覆盖已发布的 `v2.5.0`。
+
 ## 3. v2.2 文件选择器事故复盘
 
 ### 现象
@@ -164,14 +206,17 @@ QOpen.qml
   │    └─ PathPicker.qml
   │         ├─ 路径与列表交互
   │         └─ api browse-path
-  └─ Process argv
+  └─ BoundedProcess.qml
+       ├─ 单行 JSON 与响应上限
+       └─ 真实进程截止时间
           |
           v
       bin/qopen
         ├─ JSON schema 验证
-        ├─ 目录枚举
-        ├─ 文件锁
-        ├─ 备份与原子替换
+        ├─ 有界目录枚举
+        ├─ 描述符锚定状态目录
+        ├─ 目录 FD 锁
+        ├─ 有界备份与原子替换
         └─ 资源启动分发
 ```
 
@@ -200,6 +245,7 @@ QOpen.qml
 | `QOpen.qml` | 主界面、搜索、资源列表、路由与 CRUD 协调 |
 | `ResourceEditor.qml` | 新增/编辑表单 |
 | `PathPicker.qml` | 安全内嵌文件和目录浏览器 |
+| `BoundedProcess.qml` | 有界单行后端协议与进程截止时间 |
 | `BarWidget.qml` | Omarchy 状态栏按钮 |
 | `bin/qopen` | Python CLI、机器 API、持久化与启动后端 |
 | `README.md` | 用户安装、使用与排障文档 |
@@ -211,7 +257,7 @@ QOpen.qml
 
 ### 首次目录初始化
 
-`api catalog` 在 `~/.config/qopen/config.json` 不存在时，通过现有锁和原子写入流程创建
+`api catalog` 在 `~/.config/qopen/config.json` 不存在时，通过目录 FD 锁和原子写入流程创建
 一个六项通用示例目录。示例覆盖 web、project、file、TUI 和 command，包括 Omarchy、
 GitHub、home 目录、Omarchy Shell 配置、btop 与 Fastfetch。它们不包含维护者本机路径、
 凭据或网络主机。
@@ -222,17 +268,19 @@ GitHub、home 目录、Omarchy Shell 配置、btop 与 Fastfetch。它们不包�
 ### 写入流程
 
 1. QML 将编辑结果序列化为 JSON 参数。
-2. 后端读取当前配置并取得独占文件锁。
+2. 后端逐级无跟随打开可信状态目录并取得目录 FD 独占锁。
 3. 在副本上执行 mutation。
 4. 验证完整配置，而不只验证当前 item。
-5. 将旧配置复制为 `config.json.bak`。
-6. 在配置同目录创建临时文件并 `fsync`。
-7. 使用 `os.replace` 原子替换。
-8. 对配置目录执行 `fsync`。
+5. 将同一次安全读取的旧 bytes 写入 `config.json.bak` 临时文件并 `fsync`。
+6. 通过目录 FD 原子替换备份并 `fsync` 目录。
+7. 在同一目录 FD 下创建新配置临时文件并 `fsync`。
+8. 使用带 `src_dir_fd`/`dst_dir_fd` 的 `os.replace` 原子替换。
+9. 对配置目录执行 `fsync`。
 
-新建的配置、备份和锁文件使用 `0600`。旧文件不会在普通启动过程中被静默改权；
-维护者或用户通过 `qopen --doctor` 检查，再显式运行
-`qopen fix-permissions`。恢复流程先验证备份，再保存当前目录快照，最后原子替换，
+默认状态目录使用 `0700`，配置、备份和快照使用 `0600`，不再创建锁文件。旧文件
+不会在普通启动过程中被静默改权；维护者或用户通过 `qopen --doctor` 检查，再显式
+运行 `qopen fix-permissions`。自定义 `QOPEN_CONFIG` 的父目录权限只校验、不修改。
+恢复流程先验证备份，再保存当前目录快照，最后原子替换，
 因此无效备份不会覆盖现有目录。
 
 ### 命令边界

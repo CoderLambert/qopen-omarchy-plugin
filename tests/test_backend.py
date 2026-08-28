@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -28,12 +32,17 @@ class QOpenBackendTests(unittest.TestCase):
         *arguments: str,
         config: Path | None = None,
         check: bool = True,
+        environment_overrides: dict[str, str] | None = None,
+        timeout: float = 10,
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.pop("DISPLAY", None)
         environment.pop("WAYLAND_DISPLAY", None)
+        environment.pop("QOPEN_CONFIG", None)
         if config is not None:
             environment["QOPEN_CONFIG"] = str(config)
+        if environment_overrides:
+            environment.update(environment_overrides)
         return subprocess.run(
             [str(QOPEN), *arguments],
             cwd=REPOSITORY,
@@ -41,6 +50,7 @@ class QOpenBackendTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=check,
+            timeout=timeout,
         )
 
     def api(
@@ -190,6 +200,13 @@ class QOpenBackendTests(unittest.TestCase):
         self.assertNotIn("QtQuick.Dialogs", qml_source)
         self.assertNotIn("FileDialog {", qml_source)
         self.assertNotIn("FolderDialog {", qml_source)
+        self.assertNotIn("FileView {", qml_source)
+        self.assertNotIn("StdioCollector {", qml_source)
+        bounded_source = (REPOSITORY / "BoundedProcess.qml").read_text(encoding="utf-8")
+        self.assertIn("stdout: SplitParser", bounded_source)
+        self.assertIn("deadlineTimer.restart()", bounded_source)
+        self.assertIn("child.signal(15)", bounded_source)
+        self.assertIn("child.signal(9)", bounded_source)
 
     def test_qml_uses_native_mutations_and_closes_the_stock_menu(self) -> None:
         qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
@@ -206,7 +223,8 @@ class QOpenBackendTests(unittest.TestCase):
 
         self.assertIn('"--request-id", String(root.activeRequestSerial)', picker_source)
         self.assertIn("Number(result.requestId) !== root.requestSerial", picker_source)
-        self.assertIn("if (browseProcess.running) browseProcess.running = false", picker_source)
+        self.assertIn("if (browseProcess.running) browseProcess.cancel()", picker_source)
+        self.assertIn("browseProcess.start(command, root.activeRequestSerial)", picker_source)
 
     def test_command_arguments_round_trip_through_the_editor_format(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -364,7 +382,8 @@ class QOpenBackendTests(unittest.TestCase):
             self.assertFalse(response["ok"])
             self.assertIn("items[0].id", response["error"])
             qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
-            self.assertIn('catalogProcess.command = [root.backendPath, "api", "catalog"]', qopen_source)
+            self.assertIn('[root.backendPath, "api", "catalog"]', qopen_source)
+            self.assertIn("catalogProcess.start(", qopen_source)
 
     def test_catalog_waits_for_the_host_to_inject_the_plugin_directory(self) -> None:
         qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
@@ -380,9 +399,9 @@ class QOpenBackendTests(unittest.TestCase):
     def test_missing_catalog_requests_first_run_initialization(self) -> None:
         qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
 
-        self.assertIn('root.configError = "Preparing first-run resources…"', qopen_source)
-        self.assertIn("onLoadFailed: function(error)", qopen_source)
         self.assertIn("root.requestCatalogReload()", qopen_source)
+        self.assertNotIn("onLoadFailed: function(error)", qopen_source)
+        self.assertNotIn("configPath:", qopen_source)
 
     def test_fix_permissions_secures_all_state_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -392,16 +411,36 @@ class QOpenBackendTests(unittest.TestCase):
             self.api(
                 "create", "--payload", self.project_payload(root, "second"), config=config
             )
-            lock = config.with_name("config.json.lock")
             backup = config.with_name("config.json.bak")
-            for path in (config, lock, backup):
+            for path in (config, backup):
                 path.chmod(0o644)
+            root.chmod(0o755)
 
             result = self.run_qopen("fix-permissions", config=config)
 
-            self.assertIn("3 changed", result.stdout)
-            for path in (config, lock, backup):
+            self.assertIn("2 changed", result.stdout)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+            for path in (config, backup):
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertFalse(config.with_name("config.json.lock").exists())
+
+    def test_fix_permissions_secures_only_the_default_state_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory)
+            environment = {"HOME": str(home)}
+            self.run_qopen("api", "catalog", environment_overrides=environment)
+            state = home / ".config" / "qopen"
+            config = state / "config.json"
+            state.chmod(0o755)
+            config.chmod(0o644)
+
+            result = self.run_qopen(
+                "fix-permissions", environment_overrides=environment
+            )
+
+            self.assertIn("2 changed", result.stdout)
+            self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
 
     def test_doctor_reports_insecure_config_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -414,6 +453,247 @@ class QOpenBackendTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("expected 0600", result.stdout)
+
+    def test_state_parent_and_files_reject_symlinks_and_special_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            real_state = root / "real-state"
+            real_state.mkdir(mode=0o700)
+            linked_state = root / "linked-state"
+            linked_state.symlink_to(real_state, target_is_directory=True)
+
+            parent_response = self.api(
+                "catalog", config=linked_state / "config.json", check=False
+            )
+            self.assertFalse(parent_response["ok"])
+            self.assertIn("secure state directory", parent_response["error"])
+
+            sentinel = root / "sentinel"
+            sentinel.write_text("do-not-change", encoding="utf-8")
+            config = real_state / "config.json"
+            config.symlink_to(sentinel)
+            symlink_response = self.api("catalog", config=config, check=False)
+            self.assertFalse(symlink_response["ok"])
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-change")
+
+            config.unlink()
+            os.mkfifo(config, mode=0o600)
+            started = time.monotonic()
+            fifo_response = self.api("catalog", config=config, check=False)
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertFalse(fifo_response["ok"])
+            self.assertIn("regular file", fifo_response["error"])
+
+    def test_backup_symlink_is_rejected_without_touching_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            config = state / "config.json"
+            self.api("create", "--payload", self.project_payload(root), config=config)
+            sentinel = root / "sentinel"
+            sentinel.write_text("unchanged", encoding="utf-8")
+            backup = config.with_name("config.json.bak")
+            backup.unlink()
+            backup.symlink_to(sentinel)
+
+            response = self.api(
+                "create", "--payload", self.project_payload(root, "second"),
+                config=config, check=False,
+            )
+
+            self.assertFalse(response["ok"])
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
+            self.assertFalse(any(item["id"] == "second" for item in json.loads(
+                config.read_text(encoding="utf-8")
+            )["items"]))
+
+    def test_hardlinked_and_oversized_catalogs_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            source = root / "source.json"
+            source.write_text(
+                json.dumps({"version": 1, "defaults": {}, "items": []}),
+                encoding="utf-8",
+            )
+            config = state / "config.json"
+            os.link(source, config)
+
+            linked = self.api("catalog", config=config, check=False)
+            self.assertFalse(linked["ok"])
+            self.assertIn("hard links", linked["error"])
+
+            config.unlink()
+            config.write_bytes(b" " * (1024 * 1024 + 1))
+            oversized = self.run_qopen(
+                "api", "catalog", config=config, check=False
+            )
+            payload = json.loads(oversized.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertLess(len(oversized.stdout.encode("utf-8")), 4096)
+            self.assertIn("safety limit", payload["error"])
+
+    def test_group_writable_state_file_is_rejected_and_repairable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "config.json"
+            self.api("catalog", config=config)
+            config.chmod(0o660)
+
+            rejected = self.api("catalog", config=config, check=False)
+            self.assertFalse(rejected["ok"])
+            self.assertIn("writable by another account", rejected["error"])
+
+            repaired = self.run_qopen("fix-permissions", config=config)
+            self.assertIn("1 changed", repaired.stdout)
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+            self.assertTrue(self.api("catalog", config=config)["ok"])
+
+    def test_state_directory_lock_has_a_real_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "config.json"
+            self.api("catalog", config=config)
+            directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                started = time.monotonic()
+                response = self.api("catalog", config=config, check=False)
+                elapsed = time.monotonic() - started
+            finally:
+                fcntl.flock(directory_fd, fcntl.LOCK_UN)
+                os.close(directory_fd)
+
+            self.assertFalse(response["ok"])
+            self.assertIn("timed out", response["error"])
+            self.assertGreaterEqual(elapsed, 1.8)
+            self.assertLess(elapsed, 3.5)
+
+    def test_path_browser_bounds_work_and_response_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for index in range(1002):
+                (root / f"entry-{index:04d}").mkdir()
+
+            result = self.run_qopen(
+                "api", "browse-path", "--path", str(root), "--type", "project"
+            )
+            response = json.loads(result.stdout)
+
+            self.assertTrue(response["ok"])
+            self.assertTrue(response["result"]["truncated"])
+            self.assertEqual(len(response["result"]["entries"]), 1000)
+            self.assertLess(len(result.stdout.encode("utf-8")), 1280 * 1024)
+
+    def test_clipboard_helper_output_is_bounded_before_the_api_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            helper = root / "wl-paste"
+            helper.write_text(
+                f"#!{sys.executable}\nprint('x' * 20000)\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            environment = {"PATH": f"{root}:{os.environ.get('PATH', '')}"}
+
+            result = self.run_qopen(
+                "api", "clipboard-read",
+                config=root / "config.json",
+                check=False,
+                environment_overrides=environment,
+            )
+            response = json.loads(result.stdout)
+
+            self.assertFalse(response["ok"])
+            self.assertIn("safety limit", response["error"])
+            self.assertLess(len(result.stdout.encode("utf-8")), 4096)
+
+    def test_clipboard_helper_has_a_real_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            helper = root / "wl-paste"
+            helper.write_text(
+                f"#!{sys.executable}\nimport time\ntime.sleep(5)\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            environment = {"PATH": f"{root}:{os.environ.get('PATH', '')}"}
+
+            started = time.monotonic()
+            result = self.run_qopen(
+                "api", "clipboard-read",
+                config=root / "config.json",
+                check=False,
+                environment_overrides=environment,
+            )
+            elapsed = time.monotonic() - started
+            response = json.loads(result.stdout)
+
+            self.assertFalse(response["ok"])
+            self.assertLess(elapsed, 2.0)
+            self.assertIn("clipboard is unavailable", response["error"])
+
+    def test_state_lifecycle_has_no_ordinary_pathname_bypass(self) -> None:
+        source = QOPEN.read_text(encoding="utf-8")
+        self.assertNotIn("shutil.copy2", source)
+        self.assertNotIn("CONFIG_PATH.open", source)
+        self.assertNotIn("CONFIG_PATH.exists", source)
+        self.assertNotIn("os.chmod(CONFIG_PATH", source)
+        self.assertNotIn("config.json.lock", source)
+        self.assertIn("src_dir_fd=self.dir_fd", source)
+        self.assertIn("os.O_NOFOLLOW | os.O_NONBLOCK", source)
+
+    def test_state_path_race_never_writes_through_an_external_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            config = state / "config.json"
+            self.api("catalog", config=config)
+            valid_catalog = config.read_bytes()
+            sentinel = root / "sentinel"
+            sentinel.write_text("external-target", encoding="utf-8")
+            stopped = threading.Event()
+
+            def race_state_path() -> None:
+                counter = 0
+                while not stopped.is_set():
+                    temporary = state / f".attacker-{counter % 2}"
+                    counter += 1
+                    try:
+                        temporary.write_bytes(valid_catalog)
+                        os.replace(temporary, config)
+                    except OSError:
+                        pass
+                    try:
+                        config.unlink(missing_ok=True)
+                        config.symlink_to(sentinel)
+                    except OSError:
+                        pass
+
+            attacker = threading.Thread(target=race_state_path, daemon=True)
+            attacker.start()
+            try:
+                for _index in range(12):
+                    result = self.run_qopen(
+                        "api", "favorite", "--id", "omarchy", "--mode", "toggle",
+                        config=config, check=False, timeout=5,
+                    )
+                    self.assertLess(len(result.stdout.encode("utf-8")), 4096)
+                    json.loads(result.stdout)
+            finally:
+                stopped.set()
+                attacker.join(timeout=2)
+
+            self.assertFalse(attacker.is_alive())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "external-target")
+
+    def test_direct_catalog_editing_is_disabled(self) -> None:
+        result = self.run_qopen("--edit", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("direct catalog-file editing is disabled", result.stderr)
 
 
 if __name__ == "__main__":

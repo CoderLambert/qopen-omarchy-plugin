@@ -58,7 +58,7 @@ FocusScope {
     root.requestSerial++
     root.pendingPath = ""
     root.pendingRequestSerial = 0
-    if (browseProcess.running) browseProcess.running = false
+    if (browseProcess.running) browseProcess.cancel()
     root.canceled()
   }
 
@@ -85,10 +85,10 @@ FocusScope {
     root.activeRequestSerial = root.pendingRequestSerial
     root.pendingPath = ""
     root.pendingRequestSerial = 0
-    browseProcess.command = [root.backendPath, "api", "browse-path", "--path", requested,
+    var command = [root.backendPath, "api", "browse-path", "--path", requested,
       "--type", root.resourceType, "--request-id", String(root.activeRequestSerial)]
-    if (hidden) browseProcess.command.push("--show-hidden")
-    browseProcess.running = true
+    if (hidden) command.push("--show-hidden")
+    browseProcess.start(command, root.activeRequestSerial)
   }
 
   function consumeResponse(raw) {
@@ -484,14 +484,16 @@ FocusScope {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: browseProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.consumeResponse(text)
-    }
-    onExited: function(exitCode) {
+    timeoutMs: 3000
+    onFinished: function(response, exitCode, requestId, error) {
       if (!root.opened) return
+      if (requestId === root.requestSerial && !error) root.consumeResponse(response)
+      else if (requestId === root.requestSerial && error) {
+        root.loading = false
+        root.errorText = error
+      }
       if (root.pendingPath) {
         Qt.callLater(root.startPendingRequest)
         return

@@ -37,6 +37,8 @@ Item {
   property string targetLevel: ""
   property string expandedTarget: ""
   property string clipboardOutput: ""
+  property int clipboardRequestSerial: 0
+  property int targetRequestSerial: 0
 
   readonly property color foreground: Color.menu.text
   readonly property color background: Color.menu.background
@@ -269,19 +271,30 @@ Item {
   function checkTarget() {
     var value = root.primaryValue().trim()
     if (!value || root.backendPath === "" || targetProcess.running) return
+    if (value.length > 8192) {
+      root.targetStatus = "Value exceeds the safety limit"
+      root.targetLevel = "error"
+      return
+    }
     root.targetStatus = "Checking…"
     root.targetLevel = ""
-    targetProcess.command = [root.backendPath, "api", "check-target", "--type", root.selectedType, "--value", value]
-    targetProcess.running = true
+    root.targetRequestSerial++
+    targetProcess.start(
+      [root.backendPath, "api", "check-target", "--type", root.selectedType, "--value", value],
+      root.targetRequestSerial
+    )
   }
 
   function useClipboard() {
-    if (clipboardProcess.running) return
+    if (clipboardProcess.running || !root.backendPath) return
     root.clipboardOutput = ""
     root.targetStatus = "Reading clipboard…"
     root.targetLevel = ""
-    clipboardProcess.command = ["wl-paste", "--type", "text", "--no-newline"]
-    clipboardProcess.running = true
+    root.clipboardRequestSerial++
+    clipboardProcess.start(
+      [root.backendPath, "api", "clipboard-read"],
+      root.clipboardRequestSerial
+    )
   }
 
   function expandedLocalPath(value) {
@@ -340,17 +353,23 @@ Item {
     pathPicker.openPicker(root.selectedType, root.initialPickerFolder())
   }
 
-  Process {
+  BoundedProcess {
     id: clipboardProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.clipboardOutput = String(text || "").trim().split("\n")[0]
-      }
-    }
-    onExited: function(exitCode) {
-      if (exitCode !== 0 || !root.clipboardOutput) {
-        root.targetStatus = "Clipboard is unavailable or does not contain text"
+    timeoutMs: 1500
+    responseLimit: 16384
+    onFinished: function(raw, exitCode, requestId, error) {
+      if (requestId !== root.clipboardRequestSerial) return
+      try {
+        var response = error ? ({ ok: false, error: error }) : JSON.parse(String(raw || "{}"))
+        var value = response.ok && response.result ? String(response.result.text || "") : ""
+        if (!value) {
+          root.targetStatus = String(response.error || "Clipboard is unavailable or does not contain text")
+          root.targetLevel = "error"
+          return
+        }
+        root.clipboardOutput = value
+      } catch (e) {
+        root.targetStatus = "Clipboard returned an invalid response"
         root.targetLevel = "error"
         return
       }
@@ -361,27 +380,27 @@ Item {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: targetProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try {
-          var response = JSON.parse(String(text || "{}"))
-          if (!response.ok) {
-            root.targetStatus = String(response.error || "Could not validate this value")
-            root.targetLevel = "error"
-            root.expandedTarget = ""
-            return
-          }
-          var result = response.result || ({})
-          root.targetStatus = String(result.message || "")
-          root.targetLevel = String(result.level || "")
-          root.expandedTarget = String(result.expanded || "")
-        } catch (e) {
-          root.targetStatus = "Could not validate this value"
+    timeoutMs: 1500
+    responseLimit: 32768
+    onFinished: function(raw, exitCode, requestId, error) {
+      if (requestId !== root.targetRequestSerial) return
+      try {
+        var response = error ? ({ ok: false, error: error }) : JSON.parse(String(raw || "{}"))
+        if (!response.ok) {
+          root.targetStatus = String(response.error || "Could not validate this value")
           root.targetLevel = "error"
+          root.expandedTarget = ""
+          return
         }
+        var result = response.result || ({})
+        root.targetStatus = String(result.message || "")
+        root.targetLevel = String(result.level || "")
+        root.expandedTarget = String(result.expanded || "")
+      } catch (e) {
+        root.targetStatus = "Could not validate this value"
+        root.targetLevel = "error"
       }
     }
   }

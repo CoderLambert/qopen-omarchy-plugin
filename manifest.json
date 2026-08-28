@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "qopen.launcher",
   "name": "QOpen",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "author": "CoderLambert",
   "description": "Unified launcher for web, files, projects, TUI tools, commands and SSH targets",
   "kinds": [
