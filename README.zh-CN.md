@@ -2,7 +2,7 @@
 
 QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器。它把项目、文件、文档、Web 工具、终端应用、命令和 SSH 目标集中到一个支持搜索、键盘优先的界面中。
 
-不同于应用启动器，QOpen 的目录由用户主动维护：每个资源都由你选择保留、描述、分组，并在需要时快速找到。
+不同于应用启动器，QOpen 的目录由用户主动维护。新目录会提供少量通用示例，之后每个资源都可以由你保留、编辑、重新分组或删除。
 
 > English summary: QOpen is a curated personal resource launcher for Omarchy. It brings projects, files, documentation, web tools, TUI applications, commands and SSH destinations into one searchable interface with grouping, favorites and native editing.
 
@@ -15,6 +15,7 @@ QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器�
 - 使用实时主题 token 的原生 Omarchy Shell 与 Quickshell 界面。
 - 可按名称、描述、稳定 id、类型、分组、目标和命令搜索。
 - 集合显示资源数量、推荐顺序，并提供独立收藏视图。
+- 首次启动提供覆盖常见资源类型的小型实用示例目录。
 - 支持六种资源类型：web、project、file、TUI、command 和 SSH。
 - 单页新增/编辑表单，根据资源类型显示字段并进行行内校验。
 - 内置文件和目录浏览器，不使用 GTK/GVFS 文件对话框。
@@ -38,7 +39,7 @@ Omarchy 本身已经很擅长启动已安装的桌面应用和 Shell 命令。QO
 - 安全、明确的命令调用；
 - 与同一环境中的其他资源放在一起的 SSH 目标。
 
-目录始终保持小巧、可移植且易于理解。QOpen 不会扫描整个 home 目录，也不会静默加入资源。
+目录始终保持小巧、可移植且易于理解。QOpen 不会扫描整个 home 目录。它只会在目录不存在时创建首次示例，绝不会向已有目录插入默认资源。
 
 ## 与 Omarchy Menu 的关系
 
@@ -251,6 +252,21 @@ Project 模式只列出目录，并通过底部按钮选择当前目录。File �
 ```text
 ~/.config/qopen/config.json
 ```
+
+### 首次启动示例资源
+
+如果目录尚不存在，第一次打开 QOpen 时会创建六个可正常编辑的通用资源：
+
+| 资源 | 类型 | 用途 |
+| --- | --- | --- |
+| Omarchy | `web` | 打开 Omarchy 官方网站和文档 |
+| GitHub | `web` | 打开仓库、Issue、Pull Request 和 Release |
+| Home Directory | `project` | 在 `~` 中打开终端 |
+| Omarchy Shell Config | `file` | 编辑 `~/.config/omarchy/shell.json` |
+| btop | `tui` | 查看 CPU、内存、磁盘和进程 |
+| Fastfetch | `command` | 显示简洁的系统信息摘要 |
+
+已有目录绝不会被补写或修改。示例资源与普通资源完全相同，可以随时编辑或删除。QOpen 不创建 SSH 示例，因为不存在对所有用户都有效且有价值的通用主机。
 
 示例：
 

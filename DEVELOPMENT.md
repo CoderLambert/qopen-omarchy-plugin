@@ -209,6 +209,16 @@ QOpen.qml
 
 ## 6. 数据与写入安全
 
+### 首次目录初始化
+
+`api catalog` 在 `~/.config/qopen/config.json` 不存在时，通过现有锁和原子写入流程创建
+一个六项通用示例目录。示例覆盖 web、project、file、TUI 和 command，包括 Omarchy、
+GitHub、home 目录、Omarchy Shell 配置、btop 与 Fastfetch。它们不包含维护者本机路径、
+凭据或网络主机。
+
+已有配置只读取、不补写，因此升级不会把示例混入个人目录。SSH 没有跨用户有效的安全
+默认目标，必须由用户自行新增。默认示例使用普通 item 结构，可以正常编辑和删除。
+
 ### 写入流程
 
 1. QML 将编辑结果序列化为 JSON 参数。

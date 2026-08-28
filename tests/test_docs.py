@@ -33,6 +33,7 @@ SECTION_PAIRS = [
     (3, "Safe path browser keys", "安全路径浏览器快捷键"),
     (2, "Resource types", "资源类型"),
     (2, "Catalog format", "目录格式"),
+    (3, "First-run starter resources", "首次启动示例资源"),
     (2, "Command-line interface", "命令行界面"),
     (2, "Architecture and safety", "架构与安全"),
     (2, "Updating and removing", "更新和卸载"),

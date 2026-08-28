@@ -552,12 +552,12 @@ Item {
     printErrors: false
     onLoaded: root.requestCatalogReload()
     onLoadFailed: function(error) {
-      root.configError = "Config not found. Add your first resource to create it."
+      root.configError = "Preparing first-run resources…"
       root.configMissing = true
       root.catalog = ({ version: 1, defaults: ({}), items: [] })
       root.rebuildGroups()
       root.rebuildItems()
-      root.runPendingAction()
+      root.requestCatalogReload()
     }
     onFileChanged: reload()
   }
