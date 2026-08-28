@@ -597,9 +597,7 @@ Item {
             spacing: Style.space(8)
             TextField {
               id: primaryField
-              width: parent.width - pasteButton.width - checkButton.width
-                - (browseButton.visible ? browseButton.width + parent.spacing : 0)
-                - parent.spacing * 2
+              width: (parent.width - Style.space(12)) * 0.58
               text: root.primaryValue()
               placeholderText: root.primaryPlaceholder()
               foreground: root.foreground
