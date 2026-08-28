@@ -2,6 +2,20 @@
 
 All notable user-facing changes to QOpen are documented here.
 
+## [2.5.0] - 2026-08-28
+
+### Added
+
+- A six-item first-run starter catalog covering web, project, file, TUI and
+  command resources without copying maintainer-specific data.
+- Regression coverage for starter creation, private permissions and preservation
+  of existing catalogs.
+
+### Changed
+
+- The catalog API now creates the starter catalog atomically when no personal
+  configuration exists.
+
 ## [2.4.1] - 2026-08-28
 
 ### Added

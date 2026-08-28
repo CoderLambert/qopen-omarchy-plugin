@@ -12,6 +12,14 @@ from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 QOPEN = REPOSITORY / "bin" / "qopen"
+STARTER_IDS = (
+    "omarchy",
+    "github",
+    "home",
+    "omarchy-shell-config",
+    "btop",
+    "fastfetch",
+)
 
 
 class QOpenBackendTests(unittest.TestCase):
@@ -62,6 +70,37 @@ class QOpenBackendTests(unittest.TestCase):
         manifest = json.loads((REPOSITORY / "manifest.json").read_text(encoding="utf-8"))
         result = self.run_qopen("--version")
         self.assertEqual(result.stdout.strip(), f"qopen {manifest['version']}")
+
+    def test_first_catalog_request_creates_starter_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = Path(temporary_directory) / "config.json"
+
+            response = self.api("catalog", config=config)
+
+            self.assertTrue(response["ok"])
+            items = response["result"]["items"]
+            self.assertEqual(tuple(item["id"] for item in items), STARTER_IDS)
+            self.assertEqual(
+                {item["type"] for item in items},
+                {"web", "project", "file", "tui", "command"},
+            )
+            self.assertFalse(any(item["type"] == "ssh" for item in items))
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+
+    def test_existing_catalog_is_never_seeded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = Path(temporary_directory) / "config.json"
+            config.write_text(
+                json.dumps({"version": 1, "defaults": {}, "items": []}),
+                encoding="utf-8",
+            )
+            original = config.read_bytes()
+
+            response = self.api("catalog", config=config)
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["result"]["items"], [])
+            self.assertEqual(config.read_bytes(), original)
 
     def test_project_browser_returns_directories_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -117,8 +156,12 @@ class QOpenBackendTests(unittest.TestCase):
             catalog = json.loads(config.read_text(encoding="utf-8"))
 
             self.assertTrue(response["ok"])
-            self.assertEqual(catalog["items"][0]["id"], "fixture")
-            self.assertEqual(catalog["items"][0]["target"], str(root))
+            fixture = next(item for item in catalog["items"] if item["id"] == "fixture")
+            self.assertEqual(fixture["target"], str(root))
+            self.assertEqual(
+                tuple(item["id"] for item in catalog["items"]),
+                (*STARTER_IDS, "fixture"),
+            )
 
             second_payload = json.dumps(
                 {
@@ -137,7 +180,7 @@ class QOpenBackendTests(unittest.TestCase):
             self.assertTrue(backup.exists())
             self.assertEqual(
                 [item["id"] for item in json.loads(backup.read_text(encoding="utf-8"))["items"]],
-                ["fixture"],
+                [*STARTER_IDS, "fixture"],
             )
 
     def test_qml_does_not_load_native_file_dialogs(self) -> None:
@@ -201,14 +244,15 @@ class QOpenBackendTests(unittest.TestCase):
             )
             self.assertTrue(favorite["favorite"])
             catalog = json.loads(config.read_text(encoding="utf-8"))
-            original = catalog["items"][0]
+            original = next(item for item in catalog["items"] if item["id"] == "fixture")
             self.assertTrue(original["favorite"])
 
             deleted = self.api(
                 "delete", "--original", json.dumps(original), config=config
             )
             self.assertTrue(deleted["ok"])
-            self.assertEqual(json.loads(config.read_text(encoding="utf-8"))["items"], [])
+            remaining = json.loads(config.read_text(encoding="utf-8"))["items"]
+            self.assertEqual([item["id"] for item in remaining], list(STARTER_IDS))
             self.assertEqual(created["id"], deleted["item"]["id"])
 
     def test_update_rejects_a_stale_original(self) -> None:
@@ -282,7 +326,10 @@ class QOpenBackendTests(unittest.TestCase):
 
             self.assertTrue(response["ok"])
             restored = json.loads(config.read_text(encoding="utf-8"))
-            self.assertEqual([item["id"] for item in restored["items"]], ["fixture"])
+            self.assertEqual(
+                [item["id"] for item in restored["items"]],
+                [*STARTER_IDS, "fixture"],
+            )
             snapshot = Path(response["snapshot"])
             self.assertTrue(snapshot.exists())
             self.assertEqual(snapshot.read_text(encoding="utf-8"), "{broken")
@@ -329,6 +376,13 @@ class QOpenBackendTests(unittest.TestCase):
         self.assertIn("onPluginDirChanged:", qopen_source)
         self.assertIn("if (root.pluginDir) root.requestCatalogReload()", qopen_source)
         self.assertNotIn('readonly property string backendPath: pluginDir + "/bin/qopen"', qopen_source)
+
+    def test_missing_catalog_requests_first_run_initialization(self) -> None:
+        qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
+
+        self.assertIn('root.configError = "Preparing first-run resources…"', qopen_source)
+        self.assertIn("onLoadFailed: function(error)", qopen_source)
+        self.assertIn("root.requestCatalogReload()", qopen_source)
 
     def test_fix_permissions_secures_all_state_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

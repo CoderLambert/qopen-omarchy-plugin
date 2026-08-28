@@ -15,6 +15,10 @@ references, files, project directories, TUI tools, commands, and SSH targets.
 It complements the first-party Omarchy Menu; it does not replace application
 search, system setup, package management, or the stock menu.
 
+When no personal catalog exists, QOpen creates a small generic starter catalog.
+Starter changes must remain free of maintainer-specific paths and credentials,
+must never seed an existing catalog, and must not invent a generic SSH target.
+
 Non-goals:
 
 - Do not scan the complete home directory or application database.
@@ -167,6 +171,8 @@ early feedback, but every write and launch must still be validated by Python.
   requirement.
 - Keep machine API output compact JSON and send human diagnostics to the
   appropriate stream.
+- Create starter resources only when the catalog is missing; preserve existing
+  catalogs byte-for-byte during reads and upgrades.
 - Validate the complete catalog before writes, recovery, and rendering.
 - Keep file modes private (`0600`) for configuration, backup, lock, and invalid
   recovery snapshots.
