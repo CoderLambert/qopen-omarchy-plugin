@@ -400,7 +400,7 @@ omarchy restart shell
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-project/file 类型请确认展开后的路径存在；tui/command 类型请确认命令的第一个可执行文件在 `PATH` 中。
+project/file 类型请确认展开后的路径存在；tui/command 类型请确认命令的第一个可执行文件在 `PATH` 中；web 类型请确认目标是完整的 `http://` 或 `https://` 地址。
 
 ### 配置损坏或新增失败
 
