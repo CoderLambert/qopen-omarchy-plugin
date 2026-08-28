@@ -814,7 +814,7 @@ Item {
               ListView {
                 id: groupList
                 width: parent.width
-                height: parent.height - rawConfigButton.height - parent.spacing * 2 - Style.space(18)
+                height: parent.height - parent.spacing - Style.space(18)
                 model: groupModel
                 clip: true
                 spacing: Style.space(3)
