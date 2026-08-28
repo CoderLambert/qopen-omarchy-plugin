@@ -24,6 +24,7 @@ Current release: **2.3.0**
 - Single-page add/edit form with type-aware fields and inline validation.
 - Built-in file and directory browser that does not use GTK/GVFS file dialogs.
 - Normal keyboard paste plus an explicit clipboard button for path fields.
+- Automatic name, id, default group and icon inference where appropriate.
 - Inline favorite, copy-target, edit and confirmed remove actions.
 - Atomic JSON writes with locking and an automatic last-known-good backup.
 - Optional bar widget: left-click opens all resources; right-click opens favorites.
@@ -50,7 +51,7 @@ home directory or silently adds resources.
 - Quickshell as provided by Omarchy.
 - Python 3.10 or newer.
 - A Nerd Font for the supplied icons.
-- `wl-paste` for the optional clipboard button.
+- `wl-clipboard` (`wl-paste` and `wl-copy`) for clipboard actions.
 
 QOpen uses Omarchy launch helpers when available and checks the complete local
 environment with:
@@ -165,7 +166,14 @@ omarchy-shell shell toggle qopen.launcher '{"action":"add"}'
 # Add a project and open its browser immediately
 omarchy-shell shell toggle qopen.launcher \
   '{"action":"add","type":"project","browse":true}'
+
+# Open the editor for a specific resource
+omarchy-shell shell toggle qopen.launcher \
+  '{"action":"edit","item":"react"}'
 ```
+
+Route payloads only select the initial UI state. They do not bypass editor
+validation or write the catalog directly.
 
 ### Usage preview
 
@@ -174,6 +182,24 @@ omarchy-shell shell toggle qopen.launcher \
 The example shows a `react` search with curated collections on the left and
 keyboard-friendly resource actions on the right. The screenshot is cropped to
 the QOpen panel so it does not include the surrounding desktop.
+
+### Search and collections
+
+Type directly to search the selected collection. Collections are backed by the
+resource `group` field, and QOpen displays their live item counts. Common groups
+include `projects`, `frameworks`, `ui`, `testing`, `tools` and `docs`.
+
+### Adding or editing resources
+
+1. Press `Ctrl+N` or use `+ Add`.
+2. Choose a resource type.
+3. Fill in the name, id, group and type-specific target.
+4. For file/project resources, paste a path or use the embedded browser.
+5. Use Check to validate the target, then Save.
+
+Resource type is fixed while editing so type-specific fields cannot be silently
+lost. When a file or project is selected from the path browser, QOpen can infer
+the name and id from the selected path; the values remain editable before save.
 
 ### Main interface keys
 
@@ -217,6 +243,11 @@ file chooses it immediately.
 
 Paths may use `~`, environment variables or absolute paths. Expansion occurs in
 the Python backend, not through shell interpolation.
+
+A useful catalog groups related resources together, for example React rich-text
+editors, motion libraries, icon systems, TanStack tools, frameworks and testing
+references. QOpen ships recommended ordering for its known frontend-oriented
+groups while still allowing arbitrary group ids.
 
 ## Catalog format
 
@@ -272,7 +303,8 @@ Important guarantees:
 - each mutation validates the complete catalog;
 - writes use a lock and same-directory atomic replacement;
 - the previous catalog is retained as `config.json.bak`;
-- QML never writes the catalog directly.
+- QML never writes the catalog directly;
+- personal resource data is not automatically synchronized to this GitHub repository.
 
 Set `QOPEN_CONFIG` to use a different catalog with the CLI:
 
@@ -345,7 +377,9 @@ normalization, validation, persistence and process dispatch.
 The embedded path browser deliberately avoids Qt `FileDialog`, GTK, GIO and
 GVFS. QOpen runs inside the shared Omarchy Shell process; keeping native file
 dialog integration out of that process prevents a picker failure from
-terminating the entire desktop shell.
+terminating the entire desktop shell. Version 2.2 briefly used native dialogs;
+2.3 removed them after reproducible Quickshell crashes. The evidence and release
+validation are documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 Commands are passed as argument arrays. Resource values are never concatenated
 into a shell command by QML.
