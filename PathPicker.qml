@@ -78,6 +78,13 @@ FocusScope {
     if (!browseProcess.running) root.startPendingRequest()
   }
 
+  function refreshCurrentPath() {
+    if (!root.opened || root.loading) return
+    var target = root.currentPath
+    if (!target) target = String(pathField.text || "").trim()
+    root.loadPath(target || Quickshell.env("HOME"))
+  }
+
   function startPendingRequest() {
     if (!root.opened || !root.pendingPath || browseProcess.running) return
     var requested = root.pendingPath
@@ -177,6 +184,11 @@ FocusScope {
       event.accepted = true
       return
     }
+    if (event.key === Qt.Key_F5) {
+      root.refreshCurrentPath()
+      event.accepted = true
+      return
+    }
     if (pathField.activeFocus) return
     if (event.key === Qt.Key_Down && entryModel.count > 0) {
       root.selectIndex(Math.min(entryModel.count - 1, entryList.currentIndex + 1))
@@ -269,13 +281,18 @@ FocusScope {
         }
         TextField {
           id: pathField
-          width: parent.width - Style.space(42 * 4) - parent.spacing * 4
+          width: parent.width - Style.space(42 * 5) - parent.spacing * 5
           height: parent.height
           text: root.currentPath
           placeholderText: "Enter a directory path"
           foreground: root.foreground
           onAccepted: root.loadPath(text)
           Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_F5) {
+              root.refreshCurrentPath()
+              event.accepted = true
+              return
+            }
             if (event.key === Qt.Key_Escape) {
               root.forceActiveFocus()
               event.accepted = true
@@ -288,6 +305,14 @@ FocusScope {
           foreground: root.foreground; bordered: true
           enabled: !root.loading
           onClicked: root.loadPath(pathField.text)
+        }
+        Button {
+          width: Style.space(42); height: parent.height
+          iconText: "󰑐"; tooltipText: "Refresh current directory · F5"
+          foreground: root.foreground; bordered: true
+          enabled: root.currentPath !== "" && !root.loading
+          opacity: enabled ? 1 : 0.38
+          onClicked: root.refreshCurrentPath()
         }
         Button {
           width: Style.space(42); height: parent.height
