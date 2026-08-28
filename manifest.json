@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "qopen.launcher",
+  "name": "QOpen",
+  "version": "2.3.0",
+  "author": "CoderLambert",
+  "description": "Unified launcher for web, files, projects, TUI tools, commands and SSH targets",
+  "kinds": [
+    "menu",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "menu": "QOpen.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "QOpen",
+    "description": "Open the QOpen resource launcher",
+    "category": "Launcher",
+    "defaultSection": "left",
+    "allowMultiple": false
+  }
+}

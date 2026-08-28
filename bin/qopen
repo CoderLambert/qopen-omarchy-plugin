@@ -1,0 +1,1373 @@
+#!/usr/bin/env python3
+"""QOpen v1.1: a safe, user-level resource launcher for Omarchy."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import urllib.parse
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Callable
+
+
+VERSION = "2.3.0"
+CONFIG_PATH = Path(os.path.expandvars(os.environ.get("QOPEN_CONFIG", "~/.config/qopen/config.json"))).expanduser()
+LOCK_PATH = CONFIG_PATH.with_name(CONFIG_PATH.name + ".lock")
+BACKUP_PATH = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+
+SUPPORTED_TYPES = {"web", "file", "project", "tui", "command", "ssh"}
+RESERVED_IDS = {"add", "edit", "remove"}
+ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+DEFAULT_ICONS = {
+    "web": "󰖟",
+    "file": "󰈙",
+    "project": "󰉋",
+    "tui": "",
+    "command": "󰘳",
+    "ssh": "󰒍",
+}
+DEFAULT_GROUPS = {
+    "web": "web",
+    "file": "config",
+    "project": "projects",
+    "tui": "tools",
+    "command": "system",
+    "ssh": "infra",
+}
+MENU_WIDTH = 720
+MENU_MAX_HEIGHT = 640
+MENU_SETTLE_SECONDS = 0.08
+PATH_BROWSE_LIMIT = 1000
+GROUP_META = {
+    "react-editors": ("󰨞", "React · Rich Text", "Editors for custom product content workflows"),
+    "react-motion": ("󰔎", "React · Motion", "Animation, transitions and spring interactions"),
+    "react-icons": ("󰀻", "React · Icons", "Consistent SVG icons and broad icon catalogs"),
+    "react-state": ("󰘨", "React · State", "Local and application state management"),
+    "react-forms": ("󰗀", "React · Forms", "Forms, validation and typed schemas"),
+    "react-interaction": ("󰇀", "React · Interaction", "Accessibility, drag-and-drop, carousel and feedback"),
+    "tanstack": ("󰬁", "TanStack", "Type-safe React application primitives"),
+    "frameworks": ("", "Frameworks", "React frameworks and routing"),
+    "ui": ("󰏘", "UI Systems", "Components, styling and accessible primitives"),
+    "tooling": ("󰒓", "Tooling", "Build, package and TypeScript tools"),
+    "testing": ("󰙨", "Testing", "Unit, browser and component testing"),
+    "reference": ("󰈙", "Web Reference", "Platform standards and best practices"),
+    "dev": ("󰊤", "Development", "General development services"),
+    "docs": ("󰈙", "Other Docs", "Additional documentation"),
+}
+GROUP_ORDER = tuple(GROUP_META)
+
+
+class QOpenError(Exception):
+    pass
+
+
+def fail(message: str) -> None:
+    raise QOpenError(message if message.startswith("QOpen:") else f"QOpen: {message}")
+
+
+def normalize_path_input(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    if value.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(value)
+        if parsed.netloc not in {"", "localhost"}:
+            fail(f"remote file URL is not supported: {value}")
+        value = urllib.parse.unquote(parsed.path)
+    return value
+
+
+def expand_path(value: str) -> Path:
+    value = normalize_path_input(value)
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    path = Path(expanded)
+    return path if path.is_absolute() else Path.home() / path
+
+
+def expand_argv(argv: list[str]) -> list[str]:
+    return [os.path.expandvars(os.path.expanduser(arg)) for arg in argv]
+
+
+def command_argv(value: Any, field: str) -> list[str]:
+    if isinstance(value, list):
+        if not value or any(not isinstance(arg, str) or not arg for arg in value):
+            fail(f"{field} must contain non-empty strings")
+        return expand_argv(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return expand_argv(shlex.split(value))
+        except ValueError as exc:
+            fail(f"invalid {field}: {exc}")
+    fail(f"{field} must be a string or string array")
+
+
+def clean_text(value: Any) -> str:
+    return str(value).replace("\t", " ").replace("\n", " ").replace("\r", " ").strip()
+
+
+def normalize_url(url: str) -> str:
+    url = url.strip()
+    return url if re.match(r"^https?://", url, re.IGNORECASE) else f"https://{url}"
+
+
+def slugify(value: str) -> str:
+    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
+    result = re.sub(r"[^a-z0-9]+", "-", ascii_value).strip("-")
+    return result or "item"
+
+
+def unique_id(base: str, existing: set[str]) -> str:
+    candidate = base
+    counter = 2
+    while candidate in existing or candidate in RESERVED_IDS:
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def make_app_id(item: dict[str, Any], category: str) -> str:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", item["id"])
+    return f"org.qopen.{category}.{safe_id}"
+
+
+def has_command(name: str) -> bool:
+    return isinstance(name, str) and shutil.which(name) is not None
+
+
+def require_command(name: str) -> None:
+    if not has_command(name):
+        fail(f"command not found: {name}")
+
+
+def notify(title: str, message: str) -> None:
+    if not has_command("notify-send") or not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return
+    try:
+        subprocess.Popen(["notify-send", title, message], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+def user_message(message: str) -> None:
+    print(message)
+    if not sys.stdout.isatty():
+        notify("QOpen", message)
+
+
+def spawn_helper(argv: list[str]) -> None:
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        fail(f"command not found: {argv[0]}")
+    except OSError as exc:
+        fail(f"failed to launch {argv[0]}: {exc}")
+
+
+def spawn_detached(argv: list[str], cwd: Path | None = None) -> None:
+    try:
+        subprocess.Popen(argv, cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except FileNotFoundError:
+        fail(f"command not found: {argv[0]}")
+    except OSError as exc:
+        fail(f"failed to launch {argv[0]}: {exc}")
+
+
+# Omarchy compatibility layer
+def ui_select(prompt: str, options: list[str], width: int = MENU_WIDTH,
+              max_height: int = MENU_MAX_HEIGHT) -> str | None:
+    if not options:
+        return None
+    require_command("omarchy-menu-select")
+    try:
+        command = ["omarchy-menu-select", prompt, "--", "--width", str(width),
+                   "--maxheight", str(max_height)]
+        result = subprocess.run(command, input="\n".join(options) + "\n",
+                                text=True, capture_output=True, check=False)
+    except OSError as exc:
+        fail(f"failed to start picker: {exc}")
+    time.sleep(MENU_SETTLE_SECONDS)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.rstrip("\n")
+    return value or None
+
+
+def ui_input(prompt: str) -> str | None:
+    require_command("omarchy-menu-input")
+    try:
+        result = subprocess.run(["omarchy-menu-input", prompt], text=True,
+                                capture_output=True, check=False)
+    except OSError as exc:
+        fail(f"failed to start input dialog: {exc}")
+    time.sleep(MENU_SETTLE_SECONDS)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def read_clipboard_text() -> str | None:
+    if not has_command("wl-paste"):
+        return None
+    try:
+        result = subprocess.run(["wl-paste", "--type", "text", "--no-newline"],
+                                text=True, capture_output=True, check=False, timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def path_clipboard_value(value: str) -> str:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    return normalize_path_input(lines[0] if lines else value)
+
+
+def path_preview(value: str, limit: int = 88) -> str:
+    preview = clean_text(value)
+    return preview if len(preview) <= limit else preview[:limit - 1] + "…"
+
+
+def ui_path_input(prompt: str, expected: str) -> str | None:
+    clipboard = read_clipboard_text()
+    if not clipboard:
+        return ui_input(prompt)
+
+    pasted = path_clipboard_value(clipboard)
+    try:
+        path = expand_path(pasted)
+        exists = path.is_dir() if expected == "directory" else path.is_file()
+    except QOpenError:
+        exists = False
+    kind = "Directory" if expected == "directory" else "File"
+    status = f"{kind} found" if exists else f"{kind} not found; you can still paste it"
+    paste_subtext = f"{path_preview(pasted)}   ·   {status}"
+    manual_subtext = "Enter the path with the keyboard"
+    options = [
+        f"󰅍\tPaste Clipboard\t{paste_subtext}",
+        f"󰆍\tType Manually\t{manual_subtext}",
+    ]
+    selected = ui_select(prompt, options)
+    if selected is None:
+        return None
+    if selected == f"Paste Clipboard\t{paste_subtext}":
+        return pasted
+    if selected == f"Type Manually\t{manual_subtext}":
+        return ui_input(prompt)
+    fail("path input picker returned an unknown option")
+
+
+def ui_confirm(prompt: str, default: bool = False) -> bool | None:
+    options = ["Yes", "No"] if default else ["No", "Yes"]
+    value = ui_select(prompt, options)
+    return None if value is None else value == "Yes"
+
+
+def launch_web(url: str, mode: str, focus: str | None = None) -> None:
+    url = normalize_url(url)
+    if mode == "browser":
+        require_command("xdg-open")
+        spawn_detached(["xdg-open", url])
+        return
+    if focus and has_command("omarchy-launch-or-focus-webapp"):
+        spawn_helper(["omarchy-launch-or-focus-webapp", focus, url])
+        return
+    if has_command("omarchy-launch-webapp"):
+        spawn_helper(["omarchy-launch-webapp", url])
+        return
+    if has_command("xdg-open"):
+        spawn_detached(["xdg-open", url])
+        return
+    fail("neither omarchy-launch-webapp nor xdg-open is available")
+
+
+def launch_tui(argv: list[str], app_id: str) -> None:
+    if not argv:
+        fail("empty TUI command")
+    if has_command("omarchy-launch-tui"):
+        spawn_helper(["omarchy-launch-tui", f"--app-id={app_id}", *argv])
+        return
+    require_command("xdg-terminal-exec")
+    terminal_cmd = ["xdg-terminal-exec", f"--app-id={app_id}", "-e", *argv]
+    if has_command("setsid") and has_command("uwsm-app"):
+        spawn_helper(["setsid", "uwsm-app", "--", *terminal_cmd])
+    else:
+        spawn_detached(terminal_cmd)
+
+
+def launch_terminal(path: Path) -> None:
+    require_command("xdg-terminal-exec")
+    command = ["xdg-terminal-exec", f"--dir={path}"]
+    if has_command("setsid") and has_command("uwsm-app"):
+        spawn_helper(["setsid", "uwsm-app", "--", *command])
+    else:
+        spawn_detached(command)
+
+
+# Configuration and safe persistence
+def default_config() -> dict[str, Any]:
+    return {"version": 1, "defaults": {"editor": "nvim", "webMode": "app"}, "items": []}
+
+
+def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefix: str) -> None:
+    if not isinstance(item, dict):
+        fail(f"{prefix} must be an object")
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        fail(f"{prefix}.id must be a non-empty string")
+    if not ID_PATTERN.fullmatch(item_id):
+        fail(f"invalid id '{item_id}'. Use lowercase letters, numbers, _ or -")
+    if item_id in RESERVED_IDS:
+        fail(f"reserved item id: {item_id}")
+    if item_id in seen_ids:
+        fail(f"duplicate item id: {item_id}")
+    seen_ids.add(item_id)
+
+    if not isinstance(item.get("name"), str) or not item["name"].strip():
+        fail(f"{prefix}.name must be a non-empty string")
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or item_type not in SUPPORTED_TYPES:
+        fail(f"unsupported type '{item_type}' for {item_id}")
+    for field in ("group", "icon", "description"):
+        if field in item and not isinstance(item[field], str):
+            fail(f"{prefix}.{field} must be a string")
+    if "group" in item and not item["group"].strip():
+        fail(f"{prefix}.group must be a non-empty string")
+    if "favorite" in item and not isinstance(item["favorite"], bool):
+        fail(f"{prefix}.favorite must be boolean")
+
+    if item_type in {"web", "file", "project", "ssh"}:
+        if not isinstance(item.get("target"), str) or not item["target"].strip():
+            fail(f"{prefix}.target must be a non-empty string")
+    if item_type == "web":
+        mode = item.get("mode", defaults.get("webMode", "app"))
+        if not isinstance(mode, str) or mode not in {"app", "browser"}:
+            fail(f"{prefix}.mode must be app or browser")
+        if not re.match(r"^https?://", normalize_url(item["target"]), re.IGNORECASE):
+            fail(f"{prefix}.target must be an http:// or https:// URL")
+        if "focus" in item and not isinstance(item["focus"], str):
+            fail(f"{prefix}.focus must be a string")
+        if item.get("focus") and mode != "app":
+            fail(f"{prefix}.focus requires mode=app")
+    if item_type == "file" and "editor" in item:
+        command_argv(item["editor"], f"{prefix}.editor")
+    if item_type in {"tui", "command"}:
+        command = item.get("command")
+        if not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg for arg in command):
+            fail(f"{prefix}.command must be a non-empty string array")
+    if item_type == "command" and "terminal" in item and not isinstance(item["terminal"], bool):
+        fail(f"{prefix}.terminal must be boolean")
+
+
+def validate_config(config: Any) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        fail("config root must be an object")
+    if config.get("version") != 1:
+        fail(f"unsupported config version: {config.get('version')!r}")
+    defaults = config.get("defaults", {})
+    if not isinstance(defaults, dict):
+        fail("defaults must be an object")
+    web_mode = defaults.get("webMode", "app")
+    if not isinstance(web_mode, str) or web_mode not in {"app", "browser"}:
+        fail("defaults.webMode must be 'app' or 'browser'")
+    if "editor" in defaults:
+        command_argv(defaults["editor"], "defaults.editor")
+    items = config.get("items")
+    if not isinstance(items, list):
+        fail("items must be an array")
+    seen_ids: set[str] = set()
+    for index, item in enumerate(items):
+        validate_item(item, defaults, seen_ids, f"items[{index}]")
+    return config
+
+
+def read_config_unlocked(create_if_missing: bool = False) -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        if create_if_missing:
+            return default_config()
+        fail(f"config not found: {CONFIG_PATH}\nRun: qopen add")
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as file:
+            config = json.load(file)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid config.json (line {exc.lineno}, column {exc.colno}): {exc.msg}")
+    except OSError as exc:
+        fail(f"cannot read config: {exc}")
+    return validate_config(config)
+
+
+@contextmanager
+def config_lock():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        fail(f"cannot lock config: {exc}")
+
+
+def atomic_write_locked(config: dict[str, Any], backup: bool = True) -> None:
+    validate_config(config)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    original_mode = 0o600
+    if CONFIG_PATH.exists():
+        original_mode = stat.S_IMODE(CONFIG_PATH.stat().st_mode)
+        if backup:
+            try:
+                shutil.copy2(CONFIG_PATH, BACKUP_PATH)
+            except OSError as exc:
+                fail(f"failed to create backup: {exc}")
+
+    fd, temp_name = tempfile.mkstemp(prefix=".qopen-config-", suffix=".tmp", dir=CONFIG_PATH.parent)
+    temp_path = Path(temp_name)
+    try:
+        os.chmod(temp_path, original_mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, CONFIG_PATH)
+        directory_fd = os.open(CONFIG_PATH.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        fail(f"failed to write config: {exc}")
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def ensure_config() -> None:
+    if CONFIG_PATH.exists():
+        return
+    with config_lock():
+        if not CONFIG_PATH.exists():
+            atomic_write_locked(default_config(), backup=False)
+
+
+def mutate_config(mutator: Callable[[dict[str, Any]], Any]) -> Any:
+    with config_lock():
+        config = read_config_unlocked(create_if_missing=True)
+        working = copy.deepcopy(config)
+        result = mutator(working)
+        validate_config(working)
+        atomic_write_locked(working, backup=CONFIG_PATH.exists())
+        return result
+
+
+def find_item(config: dict[str, Any], item_id: str) -> dict[str, Any]:
+    for item in config["items"]:
+        if item["id"] == item_id:
+            return item
+    fail(f"unknown item: {item_id}")
+
+
+def add_item(item: dict[str, Any]) -> None:
+    def mutate(config: dict[str, Any]) -> None:
+        if any(existing["id"] == item["id"] for existing in config["items"]):
+            fail(f"item already exists: {item['id']}")
+        config["items"].append(item)
+    mutate_config(mutate)
+
+
+def update_item(original: dict[str, Any], updated: dict[str, Any]) -> None:
+    def mutate(config: dict[str, Any]) -> None:
+        for index, current in enumerate(config["items"]):
+            if current["id"] != original["id"]:
+                continue
+            if current != original:
+                fail("item changed while editing; please retry")
+            config["items"][index] = updated
+            return
+        fail(f"item no longer exists: {original['id']}")
+    mutate_config(mutate)
+
+
+def remove_item(original: dict[str, Any]) -> None:
+    def mutate(config: dict[str, Any]) -> None:
+        for index, current in enumerate(config["items"]):
+            if current["id"] != original["id"]:
+                continue
+            if current != original:
+                fail("item changed while removing; please retry")
+            del config["items"][index]
+            return
+        fail(f"item no longer exists: {original['id']}")
+    mutate_config(mutate)
+
+
+def set_favorite(item_id: str, mode: str = "toggle") -> bool:
+    """Atomically update one item's favorite flag and return its new state."""
+    def mutate(config: dict[str, Any]) -> bool:
+        item = find_item(config, item_id)
+        current = bool(item.get("favorite", False))
+        enabled = not current if mode == "toggle" else mode == "on"
+        if enabled:
+            item["favorite"] = True
+        else:
+            item.pop("favorite", None)
+        return enabled
+
+    return bool(mutate_config(mutate))
+
+
+# Picker and resource dispatch
+def group_details(group: str) -> tuple[str, str, str]:
+    fallback = group.replace("-", " ").replace("_", " ").title()
+    return GROUP_META.get(group, ("󰉋", fallback, "Resource collection"))
+
+
+def picker_option(item: dict[str, Any]) -> tuple[str, str]:
+    icon = clean_text(item.get("icon") or DEFAULT_ICONS[item["type"]])
+    name = ("★  " if item.get("favorite", False) else "") + clean_text(item["name"])
+    group = clean_text(item.get("group", "other"))
+    _, group_label, _ = group_details(group)
+    description = clean_text(item.get("description", ""))
+    subtext = description or clean_text(item.get("target", item["type"]))
+    subtext += f"   ·   {group_label}   ·   {clean_text(item['id'])}"
+    return f"{icon}\t{name}\t{subtext}", f"{name}\t{subtext}"
+
+
+def choose_item(items: list[dict[str, Any]], prompt: str = "Quick Open") -> dict[str, Any] | None:
+    if not items:
+        fail("no matching items")
+    mapping: dict[str, dict[str, Any]] = {}
+    options: list[str] = []
+    for item in items:
+        option, returned = picker_option(item)
+        options.append(option)
+        mapping[returned] = item
+    selected = ui_select(prompt, options)
+    if selected is None:
+        return None
+    if selected not in mapping:
+        fail("picker returned an unknown item")
+    return mapping[selected]
+
+
+def dispatch(item: dict[str, Any], defaults: dict[str, Any]) -> None:
+    item_type = item["type"]
+    if item_type == "web":
+        launch_web(item["target"], item.get("mode", defaults.get("webMode", "app")), item.get("focus"))
+        return
+    if item_type == "file":
+        path = expand_path(item["target"])
+        if not path.is_file():
+            fail(f"file does not exist: {path}")
+        editor = command_argv(item.get("editor", defaults.get("editor", "nvim")), "editor")
+        require_command(editor[0])
+        launch_tui([*editor, str(path)], make_app_id(item, "file"))
+        return
+    if item_type == "project":
+        path = expand_path(item["target"])
+        if not path.is_dir():
+            fail(f"project directory does not exist: {path}")
+        launch_terminal(path)
+        return
+    if item_type == "tui":
+        argv = expand_argv(item["command"])
+        require_command(argv[0])
+        launch_tui(argv, make_app_id(item, "tui"))
+        return
+    if item_type == "command":
+        argv = expand_argv(item["command"])
+        require_command(argv[0])
+        if item.get("terminal", False):
+            launch_tui(argv, make_app_id(item, "command"))
+        else:
+            spawn_detached(argv)
+        return
+    if item_type == "ssh":
+        require_command("ssh")
+        launch_tui(["ssh", item["target"]], make_app_id(item, "ssh"))
+        return
+    fail(f"unsupported type: {item_type}")
+
+
+def filter_items(config: dict[str, Any], group: str | None = None, favorites: bool = False) -> list[dict[str, Any]]:
+    items = list(config["items"])
+    if group:
+        wanted = group.lower()
+        items = [item for item in items if str(item.get("group", "other")).lower() == wanted]
+    if favorites:
+        items = [item for item in items if item.get("favorite", False)]
+    return items
+
+
+def browse_groups(config: dict[str, Any]) -> dict[str, Any] | None:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in config["items"]:
+        groups.setdefault(str(item.get("group", "other")), []).append(item)
+
+    ordered = sorted(groups, key=lambda group: (
+        GROUP_ORDER.index(group) if group in GROUP_ORDER else len(GROUP_ORDER),
+        group,
+    ))
+    options = ["\tFavorites\tFrequently used resources"]
+    mapping: dict[str, list[dict[str, Any]]] = {
+        "Favorites\tFrequently used resources": filter_items(config, favorites=True)
+    }
+    for group in ordered:
+        icon, label, description = group_details(group)
+        count = len(groups[group])
+        subtext = f"{count} resource{'s' if count != 1 else ''}   ·   {description}"
+        options.append(f"{icon}\t{label}\t{subtext}")
+        mapping[f"{label}\t{subtext}"] = groups[group]
+
+    selected = ui_select("QOpen  ·  Browse Groups", options)
+    if selected is None:
+        return None
+    items = mapping.get(selected)
+    if items is None:
+        fail("group picker returned an unknown group")
+    label = selected.split("\t", 1)[0]
+    return choose_item(items, f"QOpen  ·  {label}")
+
+
+def print_items(items: list[dict[str, Any]]) -> None:
+    for item in items:
+        favorite = "★" if item.get("favorite", False) else " "
+        print(f"{favorite} {item['id']:<18} {item['type']:<8} {item.get('group', 'other'):<12} {item['name']}")
+
+
+# Interactive manager
+def existing_groups(config: dict[str, Any]) -> list[str]:
+    return sorted({item["group"] for item in config["items"] if item.get("group")})
+
+
+def choose_group(config: dict[str, Any], fallback: str) -> str | None:
+    groups = existing_groups(config)
+    if groups:
+        counts = {group: 0 for group in groups}
+        for item in config["items"]:
+            if item.get("group") in counts:
+                counts[item["group"]] += 1
+        options: list[str] = []
+        mapping: dict[str, str] = {}
+        if fallback not in groups:
+            icon, label, _ = group_details(fallback)
+            subtext = "Recommended default for this resource type"
+            options.append(f"{icon}\t{label}\t{subtext}")
+            mapping[f"{label}\t{subtext}"] = fallback
+        for group in groups:
+            icon, label, description = group_details(group)
+            subtext = f"{counts[group]} resources   ·   {description}"
+            options.append(f"{icon}\t{label}\t{subtext}")
+            mapping[f"{label}\t{subtext}"] = group
+        options.append("\tNew Group\tCreate another resource collection")
+        selection = ui_select("Choose Group", options)
+        if selection is None:
+            return None
+        if selection != "New Group\tCreate another resource collection":
+            if selection not in mapping:
+                fail("group picker returned an unknown group")
+            return mapping[selection]
+    value = ui_input(f"Group [{fallback}]")
+    return value or fallback
+
+
+def parse_command_input(value: str) -> list[str]:
+    try:
+        argv = shlex.split(value)
+    except ValueError as exc:
+        fail(f"invalid command: {exc}")
+    if not argv:
+        fail("command cannot be empty")
+    return argv
+
+
+def preflight_warning(item: dict[str, Any]) -> str | None:
+    item_type = item["type"]
+    if item_type == "file":
+        path = expand_path(item["target"])
+        return None if path.is_file() else f"File does not exist: {path}"
+    if item_type == "project":
+        path = expand_path(item["target"])
+        return None if path.is_dir() else f"Directory does not exist: {path}"
+    if item_type in {"tui", "command"}:
+        argv = expand_argv(item["command"])
+        return None if has_command(argv[0]) else f"Command not found: {argv[0]}"
+    if item_type == "ssh" and not has_command("ssh"):
+        return "ssh command not found"
+    return None
+
+
+def interactive_add() -> int:
+    ensure_config()
+    config = read_config_unlocked()
+    type_labels = {"Web": "web", "File": "file", "Project": "project", "TUI": "tui", "Command": "command", "SSH": "ssh"}
+    selected_type = ui_select("Type", list(type_labels))
+    if selected_type is None:
+        return 0
+    item_type = type_labels[selected_type]
+    name = ui_input("Name")
+    if not name:
+        return 0
+    existing_ids = {item["id"] for item in config["items"]}
+    suggestion = unique_id(slugify(name), existing_ids)
+    item_id = ui_input(f"ID [{suggestion}]") or suggestion
+    if item_id in existing_ids:
+        fail(f"item already exists: {item_id}")
+    item: dict[str, Any] = {"id": item_id, "name": name, "type": item_type,
+                            "icon": DEFAULT_ICONS[item_type]}
+
+    if item_type == "web":
+        target = ui_input("URL")
+        if not target:
+            return 0
+        item["target"] = normalize_url(target)
+        mode = ui_select("Mode", ["app", "browser"])
+        if mode is None:
+            return 0
+        item["mode"] = mode
+    elif item_type == "file":
+        item["target"] = ui_path_input("File path", "file")
+        if not item["target"]:
+            return 0
+        item["target"] = normalize_path_input(item["target"])
+    elif item_type == "project":
+        item["target"] = ui_path_input("Project directory · e.g. ~/Code/my-app", "directory")
+        if not item["target"]:
+            return 0
+        item["target"] = normalize_path_input(item["target"])
+    elif item_type == "tui":
+        command = ui_input("Command")
+        if not command:
+            return 0
+        item["command"] = parse_command_input(command)
+    elif item_type == "command":
+        command = ui_input("Command")
+        if not command:
+            return 0
+        item["command"] = parse_command_input(command)
+        terminal = ui_confirm("Run in terminal?")
+        if terminal is None:
+            return 0
+        item["terminal"] = terminal
+    else:
+        item["target"] = ui_input("SSH host / user@host")
+        if not item["target"]:
+            return 0
+
+    group = choose_group(config, DEFAULT_GROUPS[item_type])
+    if group is None:
+        user_message(f"Canceled: {name} was not saved because no group was selected")
+        return 0
+    item["group"] = group
+
+    favorite = ui_confirm("Favorite?")
+    if favorite is None:
+        return 0
+    if favorite:
+        item["favorite"] = True
+    warning = preflight_warning(item)
+    if warning and not ui_confirm(f"{warning}. Add anyway?"):
+        return 0
+    if not ui_confirm(f"Add {name}?", default=True):
+        return 0
+    add_item(item)
+    user_message(f"✓ Added: {name} ({item_id})")
+    return 0
+
+
+def editable_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
+    fields = [
+        ("name", f"Name · {item['name']}"),
+        ("group", f"Group · {item.get('group', 'other')}"),
+        ("favorite", "Favorite · " + ("Yes" if item.get("favorite", False) else "No")),
+        ("description", "Description · " + item.get("description", "")),
+        ("icon", "Icon · " + item.get("icon", DEFAULT_ICONS[item["type"]])),
+    ]
+    if item["type"] == "web":
+        fields.extend([("target", f"URL · {item['target']}"), ("mode", "Mode · " + item.get("mode", "app")), ("focus", "Focus · " + item.get("focus", ""))])
+    elif item["type"] in {"file", "project", "ssh"}:
+        fields.append(("target", f"Target · {item['target']}"))
+    else:
+        fields.append(("command", "Command · " + shlex.join(item["command"])))
+        if item["type"] == "command":
+            fields.append(("terminal", "Terminal · " + ("Yes" if item.get("terminal", False) else "No")))
+    return fields
+
+
+def interactive_edit(item_id: str | None = None) -> int:
+    config = read_config_unlocked()
+    original = copy.deepcopy(find_item(config, item_id)) if item_id else choose_item(config["items"], "Edit Item")
+    if original is None:
+        return 0
+    edited = copy.deepcopy(original)
+    while True:
+        fields = editable_fields(edited)
+        mapping = {label: key for key, label in fields}
+        selected = ui_select(f"Edit {edited['name']}", [label for _, label in fields] + ["✓ Save", "Cancel"])
+        if selected is None or selected == "Cancel":
+            return 0
+        if selected == "✓ Save":
+            break
+        key = mapping[selected]
+        if key == "name":
+            value = ui_input(f"Name [{edited['name']}]")
+            if value:
+                edited["name"] = value
+        elif key == "group":
+            value = choose_group(config, edited.get("group", "other"))
+            if value:
+                edited["group"] = value
+        elif key == "favorite":
+            value = ui_confirm("Favorite?", edited.get("favorite", False))
+            if value is not None:
+                if value:
+                    edited["favorite"] = True
+                else:
+                    edited.pop("favorite", None)
+        elif key == "description":
+            value = ui_input("Description (- to clear)")
+            if value == "-":
+                edited.pop("description", None)
+            elif value:
+                edited["description"] = value
+        elif key == "icon":
+            value = ui_input("Icon (- to use default)")
+            if value == "-":
+                edited.pop("icon", None)
+            elif value:
+                edited["icon"] = value
+        elif key == "target":
+            if edited["type"] in {"file", "project"}:
+                expected = "file" if edited["type"] == "file" else "directory"
+                value = ui_path_input(f"Target [{edited['target']}]", expected)
+            else:
+                value = ui_input(f"Target [{edited['target']}]")
+            if value:
+                if edited["type"] == "web":
+                    edited["target"] = normalize_url(value)
+                elif edited["type"] in {"file", "project"}:
+                    edited["target"] = normalize_path_input(value)
+                else:
+                    edited["target"] = value
+        elif key == "mode":
+            value = ui_select("Mode", ["app", "browser"])
+            if value:
+                edited["mode"] = value
+                if value != "app":
+                    edited.pop("focus", None)
+        elif key == "focus":
+            value = ui_input("Focus pattern (- to clear)")
+            if value == "-":
+                edited.pop("focus", None)
+            elif value:
+                edited["focus"] = value
+                edited["mode"] = "app"
+        elif key == "command":
+            value = ui_input("Command")
+            if value:
+                edited["command"] = parse_command_input(value)
+        elif key == "terminal":
+            value = ui_confirm("Run in terminal?", edited.get("terminal", False))
+            if value is not None:
+                edited["terminal"] = value
+
+    if edited == original:
+        user_message("No changes")
+        return 0
+    warning = preflight_warning(edited)
+    if warning and not ui_confirm(f"{warning}. Save anyway?"):
+        return 0
+    if not ui_confirm("Save changes?", default=True):
+        return 0
+    update_item(original, edited)
+    user_message(f"✓ Updated: {edited['name']}")
+    return 0
+
+
+def interactive_remove(item_id: str | None = None) -> int:
+    config = read_config_unlocked()
+    item = copy.deepcopy(find_item(config, item_id)) if item_id else choose_item(config["items"], "Remove Item")
+    if item is None:
+        return 0
+    if not ui_confirm(f"Remove {item['name']}?"):
+        return 0
+    remove_item(item)
+    user_message(f"✓ Removed: {item['name']}")
+    return 0
+
+
+def build_add_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="qopen add")
+    parser.add_argument("type", nargs="?", choices=sorted(SUPPORTED_TYPES))
+    parser.add_argument("--id")
+    parser.add_argument("--name")
+    parser.add_argument("--group")
+    parser.add_argument("--target")
+    parser.add_argument("--mode", choices=["app", "browser"])
+    parser.add_argument("--focus")
+    parser.add_argument("--description")
+    parser.add_argument("--icon")
+    parser.add_argument("--favorite", action="store_true")
+    parser.add_argument("--terminal", action="store_true")
+    return parser
+
+
+def noninteractive_add(argv: list[str]) -> int:
+    parser = build_add_parser()
+    if "--" in argv:
+        separator = argv.index("--")
+        option_args = argv[:separator]
+        command = argv[separator + 1:]
+    else:
+        option_args = argv
+        command = []
+    args = parser.parse_args(option_args)
+    if args.type is None:
+        return interactive_add()
+    ensure_config()
+    config = read_config_unlocked()
+    existing_ids = {item["id"] for item in config["items"]}
+    if not args.name:
+        parser.error("--name is required")
+    item_id = args.id or unique_id(slugify(args.name), existing_ids)
+    item: dict[str, Any] = {"id": item_id, "name": args.name, "type": args.type,
+                            "group": args.group or DEFAULT_GROUPS[args.type],
+                            "icon": args.icon or DEFAULT_ICONS[args.type]}
+    if args.description:
+        item["description"] = args.description
+    if args.favorite:
+        item["favorite"] = True
+    if args.type == "web":
+        if not args.target:
+            parser.error("--target is required for web")
+        item["target"] = normalize_url(args.target)
+        if args.mode:
+            item["mode"] = args.mode
+        if args.focus:
+            item["focus"] = args.focus
+            item["mode"] = "app"
+    elif args.type in {"file", "project", "ssh"}:
+        if not args.target:
+            parser.error(f"--target is required for {args.type}")
+        item["target"] = normalize_path_input(args.target) if args.type in {"file", "project"} else args.target
+    else:
+        if not command:
+            parser.error(f"{args.type} requires a command after --")
+        item["command"] = command
+        if args.type == "command":
+            item["terminal"] = args.terminal
+    warning = preflight_warning(item)
+    if warning:
+        print(f"QOpen: warning: {warning}", file=sys.stderr)
+    add_item(item)
+    user_message(f"✓ Added: {args.name} ({item_id})")
+    return 0
+
+
+# Machine API used by the native Omarchy plugin editor. It deliberately keeps
+# all validation and persistence in Python while QML owns only presentation.
+def api_emit(ok: bool, **payload: Any) -> None:
+    print(json.dumps({"ok": ok, **payload}, ensure_ascii=False, separators=(",", ":")))
+
+
+def parse_api_payload(value: str, field: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid {field} JSON: {exc.msg}")
+    if not isinstance(parsed, dict):
+        fail(f"{field} must be a JSON object")
+    return parsed
+
+
+def normalize_api_item(raw: dict[str, Any], config: dict[str, Any],
+                       original: dict[str, Any] | None = None) -> dict[str, Any]:
+    item_type = clean_text(raw.get("type", ""))
+    if item_type not in SUPPORTED_TYPES:
+        fail(f"unsupported type '{item_type}'")
+
+    name = clean_text(raw.get("name", ""))
+    if not name:
+        fail("name is required")
+
+    existing_ids = {item["id"] for item in config["items"]}
+    if original:
+        existing_ids.discard(original["id"])
+    requested_id = clean_text(raw.get("id", ""))
+    item_id = requested_id or unique_id(slugify(name), existing_ids)
+    if item_id in existing_ids:
+        fail(f"item already exists: {item_id}")
+
+    item: dict[str, Any] = {
+        "id": item_id,
+        "name": name,
+        "type": item_type,
+        "group": clean_text(raw.get("group", "")) or DEFAULT_GROUPS[item_type],
+        "icon": clean_text(raw.get("icon", "")) or DEFAULT_ICONS[item_type],
+    }
+    description = clean_text(raw.get("description", ""))
+    if description:
+        item["description"] = description
+    if bool(raw.get("favorite", False)):
+        item["favorite"] = True
+
+    if item_type == "web":
+        target = clean_text(raw.get("target", ""))
+        if not target:
+            fail("URL is required")
+        item["target"] = normalize_url(target)
+        item["mode"] = clean_text(raw.get("mode", "")) or config.get("defaults", {}).get("webMode", "app")
+        focus = clean_text(raw.get("focus", ""))
+        if focus:
+            item["focus"] = focus
+            item["mode"] = "app"
+    elif item_type in {"file", "project"}:
+        target = clean_text(raw.get("target", ""))
+        if not target:
+            fail("path is required")
+        item["target"] = normalize_path_input(target)
+        if item_type == "file":
+            editor = raw.get("editor")
+            if isinstance(editor, str) and editor.strip():
+                item["editor"] = parse_command_input(editor)
+            elif isinstance(editor, list) and editor:
+                item["editor"] = editor
+    elif item_type == "ssh":
+        target = clean_text(raw.get("target", ""))
+        if not target:
+            fail("SSH host is required")
+        item["target"] = target
+    else:
+        command = raw.get("command", "")
+        item["command"] = parse_command_input(command) if isinstance(command, str) else command
+        if item_type == "command" and bool(raw.get("terminal", False)):
+            item["terminal"] = True
+
+    return item
+
+
+def validate_api_item(config: dict[str, Any], item: dict[str, Any],
+                      original: dict[str, Any] | None = None) -> list[str]:
+    working = copy.deepcopy(config)
+    if original is None:
+        working["items"].append(item)
+    else:
+        replaced = False
+        for index, current in enumerate(working["items"]):
+            if current["id"] == original["id"]:
+                working["items"][index] = item
+                replaced = True
+                break
+        if not replaced:
+            fail(f"item no longer exists: {original['id']}")
+    validate_config(working)
+    warning = preflight_warning(item)
+    return [warning] if warning else []
+
+
+def api_check_target(item_type: str, value: str) -> dict[str, Any]:
+    value = value.strip()
+    if not value:
+        return {"valid": False, "level": "error", "message": "A value is required", "normalized": ""}
+    if item_type == "web":
+        normalized = normalize_url(value)
+        valid = bool(re.match(r"^https?://[^\s]+$", normalized, re.IGNORECASE))
+        return {"valid": valid, "level": "ok" if valid else "error",
+                "message": "Valid web URL" if valid else "Enter a valid HTTP or HTTPS URL",
+                "normalized": normalized}
+    if item_type in {"file", "project"}:
+        normalized = normalize_path_input(value)
+        path = expand_path(normalized)
+        exists = path.is_file() if item_type == "file" else path.is_dir()
+        expected = "File" if item_type == "file" else "Directory"
+        return {"valid": True, "exists": exists, "level": "ok" if exists else "warning",
+                "message": f"{expected} exists" if exists else f"{expected} does not exist yet",
+                "normalized": normalized, "expanded": str(path)}
+    if item_type in {"tui", "command"}:
+        try:
+            argv = parse_command_input(value)
+        except QOpenError as exc:
+            return {"valid": False, "level": "error", "message": str(exc), "normalized": value}
+        found = has_command(expand_argv(argv)[0])
+        return {"valid": True, "exists": found, "level": "ok" if found else "warning",
+                "message": "Command is available" if found else f"Command not found: {argv[0]}",
+                "normalized": value}
+    if item_type == "ssh":
+        return {"valid": True, "level": "ok", "message": "SSH destination", "normalized": value}
+    return {"valid": False, "level": "error", "message": "Unsupported resource type", "normalized": value}
+
+
+def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False) -> dict[str, Any]:
+    """List one local directory without loading Qt, GTK, GIO or GVFS."""
+    path = expand_path(path_value or str(Path.home()))
+    try:
+        if path.is_file():
+            path = path.parent
+        if not path.exists():
+            fail(f"directory does not exist: {path}")
+        if not path.is_dir():
+            fail(f"not a directory: {path}")
+        path = path.absolute()
+
+        entries: list[dict[str, Any]] = []
+        with os.scandir(path) as directory:
+            for entry in directory:
+                if not show_hidden and entry.name.startswith("."):
+                    continue
+                try:
+                    is_directory = entry.is_dir(follow_symlinks=True)
+                    is_file = entry.is_file(follow_symlinks=True)
+                except OSError:
+                    continue
+                if item_type == "project" and not is_directory:
+                    continue
+                if not is_directory and not is_file:
+                    continue
+                entries.append({
+                    "name": entry.name,
+                    "path": str(path / entry.name),
+                    "kind": "directory" if is_directory else "file",
+                    "hidden": entry.name.startswith("."),
+                    "symlink": entry.is_symlink(),
+                })
+    except PermissionError:
+        fail(f"permission denied: {path}")
+    except OSError as exc:
+        fail(f"cannot read directory {path}: {exc.strerror or exc}")
+
+    entries.sort(key=lambda item: (item["kind"] != "directory", item["name"].casefold()))
+    truncated = len(entries) > PATH_BROWSE_LIMIT
+    if truncated:
+        entries = entries[:PATH_BROWSE_LIMIT]
+    parent = path.parent
+    return {
+        "path": str(path),
+        "parent": "" if parent == path else str(parent),
+        "entries": entries,
+        "truncated": truncated,
+    }
+
+
+def api_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="qopen api")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    for action in ("validate", "create"):
+        child = subparsers.add_parser(action)
+        child.add_argument("--payload", required=True)
+    update_parser = subparsers.add_parser("update")
+    update_parser.add_argument("--payload", required=True)
+    update_parser.add_argument("--original", required=True)
+    delete_parser = subparsers.add_parser("delete")
+    delete_parser.add_argument("--original", required=True)
+    check_parser = subparsers.add_parser("check-target")
+    check_parser.add_argument("--type", required=True, choices=sorted(SUPPORTED_TYPES))
+    check_parser.add_argument("--value", required=True)
+    browse_parser = subparsers.add_parser("browse-path")
+    browse_parser.add_argument("--path", required=True)
+    browse_parser.add_argument("--type", required=True, choices=("file", "project"))
+    browse_parser.add_argument("--show-hidden", action="store_true")
+    args = parser.parse_args(argv)
+
+    try:
+        if args.action == "check-target":
+            api_emit(True, result=api_check_target(args.type, args.value))
+            return 0
+        if args.action == "browse-path":
+            api_emit(True, result=api_browse_path(args.path, args.type, args.show_hidden))
+            return 0
+
+        ensure_config()
+        config = read_config_unlocked()
+        if args.action == "delete":
+            original = parse_api_payload(args.original, "original")
+            remove_item(original)
+            api_emit(True, action="delete", item=original)
+            return 0
+
+        original = parse_api_payload(args.original, "original") if args.action == "update" else None
+        raw = parse_api_payload(args.payload, "payload")
+        item = normalize_api_item(raw, config, original)
+        warnings = validate_api_item(config, item, original)
+
+        if args.action == "validate":
+            api_emit(True, action="validate", item=item, warnings=warnings)
+        elif args.action == "create":
+            add_item(item)
+            api_emit(True, action="create", item=item, warnings=warnings)
+        else:
+            update_item(original, item)
+            api_emit(True, action="update", item=item, warnings=warnings)
+        return 0
+    except QOpenError as exc:
+        api_emit(False, error=str(exc))
+        return 1
+
+
+def edit_config() -> int:
+    ensure_config()
+    config = read_config_unlocked()
+    editor = command_argv(config.get("defaults", {}).get("editor", os.environ.get("EDITOR", "nvim")), "editor")
+    require_command(editor[0])
+    launch_tui([*editor, str(CONFIG_PATH)], "org.qopen.config")
+    return 0
+
+
+def doctor() -> int:
+    failed = False
+
+    def check(ok: bool, message: str) -> None:
+        nonlocal failed
+        print(f"{'✓' if ok else '✗'} {message}")
+        if not ok:
+            failed = True
+
+    check(CONFIG_PATH.exists(), f"config: {CONFIG_PATH}")
+    if not CONFIG_PATH.exists():
+        return 1
+    try:
+        config = read_config_unlocked()
+        check(True, "config schema")
+    except QOpenError as exc:
+        check(False, str(exc))
+        return 1
+    check(os.access(CONFIG_PATH, os.W_OK), "config writable")
+    try:
+        with config_lock():
+            pass
+        check(True, "config lock")
+    except QOpenError:
+        check(False, "config lock")
+    check(has_command("omarchy-menu-select"), "omarchy-menu-select")
+    check(has_command("omarchy-menu-input"), "omarchy-menu-input")
+    print(f"{'✓' if has_command('wl-paste') else '~'} wl-paste (clipboard path input)")
+    for command in sorted({"omarchy-launch-webapp", "omarchy-launch-tui", "omarchy-launch-or-focus-webapp"}):
+        print(f"{'✓' if has_command(command) else '~'} {command}")
+    check(has_command("xdg-terminal-exec"), "xdg-terminal-exec")
+    check(has_command("xdg-open"), "xdg-open")
+    defaults = config.get("defaults", {})
+    for item in config["items"]:
+        item_id = item["id"]
+        item_type = item["type"]
+        if item_type == "file":
+            path = expand_path(item["target"])
+            check(path.is_file(), f"{item_id}: {path}")
+            editor = command_argv(item.get("editor", defaults.get("editor", "nvim")), "editor")
+            check(has_command(editor[0]), f"{item_id}: editor {editor[0]}")
+        elif item_type == "project":
+            path = expand_path(item["target"])
+            check(path.is_dir(), f"{item_id}: {path}")
+        elif item_type in {"tui", "command"}:
+            argv = expand_argv(item["command"])
+            check(has_command(argv[0]), f"{item_id}: {argv[0]}")
+        elif item_type == "ssh":
+            check(has_command("ssh"), f"{item_id}: ssh")
+        else:
+            check(True, f"{item_id}: {item_type}")
+    return 1 if failed else 0
+
+
+def normal_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="qopen", description="Omarchy personal resource launcher")
+    parser.add_argument("item_id", nargs="?")
+    parser.add_argument("--group")
+    parser.add_argument("--favorites", action="store_true")
+    parser.add_argument("--groups", action="store_true", help="browse resources by group")
+    parser.add_argument("--list", action="store_true", dest="list_items")
+    parser.add_argument("--edit", action="store_true")
+    parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    return parser
+
+
+def main() -> int:
+    raw_args = sys.argv[1:]
+    if raw_args and raw_args[0] == "api":
+        return api_cli(raw_args[1:])
+    if raw_args and raw_args[0] == "add":
+        return noninteractive_add(raw_args[1:])
+    if raw_args and raw_args[0] == "edit":
+        ensure_config()
+        parser = argparse.ArgumentParser(prog="qopen edit")
+        parser.add_argument("item_id", nargs="?")
+        return interactive_edit(parser.parse_args(raw_args[1:]).item_id)
+    if raw_args and raw_args[0] == "remove":
+        ensure_config()
+        parser = argparse.ArgumentParser(prog="qopen remove")
+        parser.add_argument("item_id", nargs="?")
+        return interactive_remove(parser.parse_args(raw_args[1:]).item_id)
+    if raw_args and raw_args[0] == "favorite":
+        ensure_config()
+        parser = argparse.ArgumentParser(prog="qopen favorite")
+        parser.add_argument("item_id")
+        parser.add_argument("mode", nargs="?", choices=["toggle", "on", "off"], default="toggle")
+        args = parser.parse_args(raw_args[1:])
+        enabled = set_favorite(args.item_id, args.mode)
+        user_message(f"{'★' if enabled else '☆'} Favorite {'enabled' if enabled else 'disabled'}: {args.item_id}")
+        return 0
+
+    parser = normal_parser()
+    args = parser.parse_args(raw_args)
+    if args.doctor:
+        return doctor()
+    if args.edit:
+        return edit_config()
+    config = read_config_unlocked()
+    defaults = config.get("defaults", {})
+    if args.item_id:
+        if args.group or args.favorites or args.groups or args.list_items:
+            parser.error("item_id cannot be combined with filters")
+        dispatch(find_item(config, args.item_id), defaults)
+        return 0
+    if args.groups:
+        if args.group or args.favorites or args.list_items:
+            parser.error("--groups cannot be combined with other filters")
+        item = browse_groups(config)
+        if item is not None:
+            dispatch(item, defaults)
+        return 0
+    items = filter_items(config, group=args.group, favorites=args.favorites)
+    if args.list_items:
+        print_items(items)
+        return 0
+    prompt = "Quick Open"
+    if args.group:
+        prompt += f" · {args.group}"
+    elif args.favorites:
+        prompt += " · Favorites"
+    item = choose_item(items, prompt)
+    if item is not None:
+        dispatch(item, defaults)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except QOpenError as exc:
+        message = str(exc)
+        print(message, file=sys.stderr)
+        notify("QOpen Error", message)
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
