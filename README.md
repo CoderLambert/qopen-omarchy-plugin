@@ -45,6 +45,38 @@ QOpen covers the layer that application indexes do not model cleanly:
 The catalog remains small, portable and understandable. QOpen never crawls your
 home directory or silently adds resources.
 
+## Relationship to Omarchy Menu
+
+QOpen complements the stock Omarchy Menu; it does not replace it. The two
+interfaces have deliberately different ownership:
+
+| Concern | Omarchy Menu | QOpen |
+| --- | --- | --- |
+| Primary role | System control and application management | Curated personal resource access |
+| Typical content | Apps, setup, install, remove, update, style and system actions | Projects, files, selected documentation, web tools, TUI commands and SSH targets |
+| Data source | Omarchy defaults, application providers and menu extensions | `~/.config/qopen/config.json` |
+| Organization | System-defined menus and routes | User-defined groups, descriptions and favorites |
+| Best entry point | Stock shortcut or Omarchy bar button | `Super+Alt+O`, optional bar button or Omarchy Menu submenu |
+
+The integration does not override stock identifiers. Omarchy Menu uses plugin
+id `omarchy.menu` and layer namespace `omarchy-menu`; QOpen uses
+`qopen.launcher` and `qopen-launcher`. Its menu-extension ids are namespaced as
+`custom-qopen.*`. The recommended QOpen shortcut did not collide with the stock
+menu binding on the tested Omarchy 4.0.1 setup, but local bindings should still
+be checked before installation.
+
+Keep system-wide operations such as application discovery, package installation,
+updates, appearance and power actions in Omarchy Menu. Keep manually selected
+projects, files, references and environment targets in QOpen. Mirroring all of
+Apps, Install, Update or System inside QOpen would create unnecessary duplication.
+
+The QOpen submenu inside Omarchy Menu is an optional bridge, and its bar widget
+is also optional. Both menus are full-screen overlay surfaces with exclusive
+keyboard focus. Launching QOpen from an Omarchy Menu action is safe because the
+stock menu closes before running the action. If separate shortcuts are invoked
+while the other menu is still open, both overlays can remain mounted; press
+Escape to close the active overlay before switching to the other one.
+
 ## Requirements
 
 - Omarchy with the current Omarchy Shell plugin commands.

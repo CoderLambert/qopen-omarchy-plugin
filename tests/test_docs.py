@@ -13,6 +13,7 @@ CHINESE_README = REPOSITORY / "README.zh-CN.md"
 SECTION_PAIRS = [
     (2, "Highlights", "功能亮点"),
     (2, "Why QOpen exists", "为什么需要 QOpen"),
+    (2, "Relationship to Omarchy Menu", "与 Omarchy Menu 的关系"),
     (2, "Requirements", "环境要求"),
     (2, "Installation", "安装"),
     (3, "Add QOpen to the Omarchy menu", "将 QOpen 添加到 Omarchy 菜单"),

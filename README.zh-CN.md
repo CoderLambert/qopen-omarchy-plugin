@@ -38,6 +38,24 @@ Omarchy 本身已经很擅长启动已安装的桌面应用和 Shell 命令。QO
 
 目录始终保持小巧、可移植且易于理解。QOpen 不会扫描整个 home 目录，也不会静默加入资源。
 
+## 与 Omarchy Menu 的关系
+
+QOpen 是系统自带 Omarchy Menu 的补充，而不是替代品。两个界面有明确不同的职责边界：
+
+| 方面 | Omarchy Menu | QOpen |
+| --- | --- | --- |
+| 主要职责 | 系统控制和应用管理 | 访问经过筛选的个人资源 |
+| 典型内容 | Apps、Setup、Install、Remove、Update、Style 和 System 操作 | 项目、文件、精选文档、Web 工具、TUI 命令和 SSH 目标 |
+| 数据来源 | Omarchy 默认项、应用 provider 和菜单扩展 | `~/.config/qopen/config.json` |
+| 组织方式 | 系统定义的菜单和路由 | 用户定义的分组、描述和收藏 |
+| 推荐入口 | 系统快捷键或 Omarchy 状态栏按钮 | `Super+Alt+O`、可选状态栏按钮或 Omarchy Menu 子菜单 |
+
+该集成不会覆盖系统标识符。Omarchy Menu 使用插件 id `omarchy.menu` 和 Layer namespace `omarchy-menu`；QOpen 使用 `qopen.launcher` 和 `qopen-launcher`。QOpen 的菜单扩展 id 统一使用 `custom-qopen.*` 命名空间。在经过测试的 Omarchy 4.0.1 环境中，推荐的 QOpen 快捷键与系统菜单快捷键不冲突，但安装前仍应检查本机快捷键配置。
+
+应用发现、软件包安装、系统更新、外观设置和电源操作等系统级功能应继续放在 Omarchy Menu；手动选择的项目、文件、参考资料和环境目标应放在 QOpen。把 Apps、Install、Update 或 System 完整复制到 QOpen 会造成不必要的功能重复。
+
+Omarchy Menu 中的 QOpen 子菜单只是可选的桥接入口，QOpen 状态栏组件同样可选。两个菜单都是使用独占键盘焦点的全屏 Overlay。通过 Omarchy Menu 操作启动 QOpen 是安全的，因为系统菜单会在执行操作前关闭。如果在一个菜单仍打开时调用另一个菜单的独立快捷键，两个 Overlay 可能同时保持挂载；切换前先按 `Escape` 关闭当前 Overlay 即可。
+
 ## 环境要求
 
 - 支持当前 Omarchy Shell 插件命令的 Omarchy。
