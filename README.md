@@ -362,7 +362,10 @@ Important guarantees:
 - writes use a lock on the trusted state-directory descriptor and same-directory
   atomic replacement;
 - the previous catalog is retained as `config.json.bak`;
-- the default state directory is private (`0700`) and state files use `0600`;
+- new default state directories are created with `0700`, and new or rewritten state
+  files use `0600`; existing state is accepted only when it is not group- or
+  world-writable, while `--doctor` reports looser private modes and
+  `fix-permissions` repairs the default state directory and files to `0700`/`0600`;
 - catalog reads, API responses, helper output and directory scans are bounded;
 - QML never opens or writes the catalog directly and backend processes have deadlines;
 - personal resource data is not automatically synchronized to this GitHub repository.
@@ -451,14 +454,21 @@ terminating the entire desktop shell. Version 2.2 briefly used native dialogs;
 2.3 removed them after reproducible Quickshell crashes. The evidence and release
 validation are documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
+User-selected resource browsing intentionally follows symlinks so ordinary
+project and file workflows behave like the filesystem the user selected. That
+browser path is not used for QOpen persistence: catalog, backup, lock and
+replacement operations stay inside the separately validated `SecureStateStore`
+trust boundary.
+
 Commands are passed as argument arrays. Resource values are never concatenated
 into a shell command by QML.
 
 QML does not use `FileView` for the catalog and does not retain complete process
 streams with `StdioCollector`. The Python producer validates and caps every API
-response before writing it, while QML applies a second response limit and a real
-deadline with TERM-to-KILL escalation. Catalog, backup and recovery operations
-remain anchored to one trusted directory descriptor for their complete lifecycle.
+response before writing it; QML then applies a secondary protocol-size check.
+Bounded helper processes run in their own process groups and have real deadlines
+with TERM-to-KILL escalation. Catalog, backup and recovery operations remain
+anchored to one trusted directory descriptor for their complete lifecycle.
 
 Direct raw editing through `$QOPEN --edit` is intentionally disabled because an
 external editor cannot participate in QOpen's lock, validation, backup and atomic
