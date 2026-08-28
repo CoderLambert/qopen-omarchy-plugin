@@ -8,6 +8,8 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[1]
 ENGLISH_README = REPOSITORY / "README.md"
 CHINESE_README = REPOSITORY / "README.zh-CN.md"
+MARKETPLACE_PREVIEW = REPOSITORY / "preview.png"
+README_SCREENSHOT = REPOSITORY / "docs" / "assets" / "qopen-usage.png"
 
 
 SECTION_PAIRS = [
@@ -109,6 +111,10 @@ class ReadmeParityTests(unittest.TestCase):
         self.assertIn("当前版本：**2.4.0**", chinese)
         self.assertEqual(english.count("docs/assets/qopen-usage.png"), 1)
         self.assertEqual(chinese.count("docs/assets/qopen-usage.png"), 1)
+
+    def test_marketplace_preview_matches_the_documented_interface(self) -> None:
+        self.assertTrue(MARKETPLACE_PREVIEW.is_file())
+        self.assertEqual(MARKETPLACE_PREVIEW.read_bytes(), README_SCREENSHOT.read_bytes())
 
 
 if __name__ == "__main__":
