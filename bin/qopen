@@ -218,7 +218,9 @@ def normalize_url(url: str) -> str:
 
 
 def validate_http_url(url: str, field: str = "URL") -> str:
-    normalized = normalize_url(url)
+    raw = require_safe_text(url, field).strip()
+    has_explicit_scheme = bool(re.match(r"^https?://", raw, re.IGNORECASE))
+    normalized = normalize_url(raw)
     if any(character.isspace() for character in normalized):
         fail(f"{field} must not contain whitespace")
     try:
@@ -233,8 +235,10 @@ def validate_http_url(url: str, field: str = "URL") -> str:
     if port is not None and not 1 <= port <= 65535:
         fail(f"{field} contains an invalid port")
     hostname = parsed.hostname.rstrip(".")
+    is_ip_address = False
     try:
         ipaddress.ip_address(hostname)
+        is_ip_address = True
     except ValueError:
         try:
             ascii_hostname = hostname.encode("idna").decode("ascii")
@@ -247,6 +251,10 @@ def validate_http_url(url: str, field: str = "URL") -> str:
                 or not re.fullmatch(r"[A-Za-z0-9-]+", label)
                 for label in labels)):
             fail(f"{field} contains an invalid host")
+    if (not has_explicit_scheme and not is_ip_address
+            and hostname.lower() != "localhost" and "." not in hostname):
+        fail(f"{field} must be a domain, IP address, localhost, "
+             "or include http:// / https://")
     return normalized
 
 
