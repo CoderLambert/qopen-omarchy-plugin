@@ -215,6 +215,8 @@ class QOpenBackendTests(unittest.TestCase):
         self.assertIn('"api", "favorite"', qopen_source)
         self.assertIn('"api", "delete"', qopen_source)
         self.assertIn('"api", "recover"', qopen_source)
+        self.assertNotIn('"--edit"', qopen_source)
+        self.assertNotIn("Edit raw config", qopen_source)
         self.assertNotIn('[root.backendPath, "favorite"', qopen_source)
         self.assertNotIn('[root.backendPath, "remove"', qopen_source)
 

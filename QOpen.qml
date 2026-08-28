@@ -420,12 +420,6 @@ Item {
     Qt.callLater(function() { Quickshell.execDetached(args) })
   }
 
-  function editRawConfig() {
-    if (!root.backendPath) return
-    root.dismiss()
-    Qt.callLater(function() { Quickshell.execDetached([root.backendPath, "--edit"]) })
-  }
-
   function toggleFavorite(itemId) {
     if (!itemId || mutationProcess.running) return
     root.statusText = "Updating favorite…"
@@ -895,32 +889,6 @@ Item {
                 }
               }
 
-              Rectangle {
-                id: rawConfigButton
-                width: parent.width
-                height: Style.space(36)
-                radius: root.radius
-                color: rawMouse.containsMouse ? root.subtle : "transparent"
-                border.width: 1
-                border.color: root.subtle
-
-                Text {
-                  text: "   Edit raw config"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  anchors.centerIn: parent
-                }
-
-                MouseArea {
-                  id: rawMouse
-                  anchors.fill: parent
-                  enabled: !root.editorOpen
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.editRawConfig()
-                }
-              }
             }
 
             Rectangle {
