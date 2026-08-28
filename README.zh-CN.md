@@ -6,7 +6,7 @@ QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器�
 
 > English summary: QOpen is a curated personal resource launcher for Omarchy. It brings projects, files, documentation, web tools, TUI applications, commands and SSH destinations into one searchable interface with grouping, favorites and native editing.
 
-当前版本：**2.4.1**
+当前版本：**2.4.2**
 
 **文档：** [English](README.md) · [开发记录](DEVELOPMENT.md)
 
@@ -72,7 +72,7 @@ QOpen 会在可用时使用 Omarchy 的启动 helper，并可通过以下命令�
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-2.4.1 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证。这些是已测试版本，并非严格版本锁定。
+2.4.2 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证。这些是已测试版本，并非严格版本锁定。
 
 ## 安装
 

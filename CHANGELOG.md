@@ -2,6 +2,21 @@
 
 All notable user-facing changes to QOpen are documented here.
 
+## [2.4.2] - 2026-08-28
+
+### Added
+
+- Root `AGENTS.md` collaboration contract for AI agents and human maintainers,
+  covering architecture, branch promotion, testing, installation, upgrades,
+  releases and marketplace validation.
+- Regression coverage that preserves the critical collaboration and release
+  workflow contracts documented for future contributors.
+
+### Changed
+
+- The development guide now links to the AI collaboration contract, with the
+  branch, testing, installation and release rules consolidated for reuse.
+
 ## [2.4.1] - 2026-08-28
 
 ### Added
