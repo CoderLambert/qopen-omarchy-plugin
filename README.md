@@ -12,7 +12,7 @@ regrouped or removed by you.
 > 而是把项目目录、文件、常用文档、前端生态网站、TUI、命令和 SSH 目标集中到
 > 一个支持搜索、分组、收藏与原生编辑的界面中。
 
-Current release: **2.5.0**
+Current release: **2.5.1**
 
 **Documentation:** [简体中文](README.zh-CN.md) · [Development record](DEVELOPMENT.md)
 
@@ -28,7 +28,8 @@ Current release: **2.5.0**
 - Normal keyboard paste plus an explicit clipboard button for path fields.
 - Automatic name, id, default group and icon inference where appropriate.
 - Inline favorite, copy-target, edit and confirmed remove actions.
-- Atomic JSON writes with locking and an automatic last-known-good backup.
+- Descriptor-anchored JSON writes with directory locking and a last-known-good backup.
+- Bounded backend responses and real process deadlines before data reaches QML.
 - Validated backup recovery and explicit private-permission repair commands.
 - Lossless editing of command arguments containing spaces or quotes.
 - Optional bar widget: left-click opens all resources; right-click opens favorites.
@@ -97,7 +98,7 @@ environment with:
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-The 2.5.0 release was developed and verified on Omarchy 4.0.1, Quickshell
+The 2.5.1 release was developed and verified on Omarchy 4.0.1, Quickshell
 0.3.1 and Qt 6.11.2. These are tested versions, not strict pins.
 
 ## Installation
@@ -356,19 +357,29 @@ Important guarantees:
 
 - ids contain lowercase letters, numbers, `_` or `-` and must be unique;
 - each mutation validates the complete catalog;
-- writes use a lock and same-directory atomic replacement;
+- every state-directory component is opened without following symlinks;
+- configuration and backup access rejects symlinks, hard links and non-regular files;
+- writes use a lock on the trusted state-directory descriptor and same-directory
+  atomic replacement;
 - the previous catalog is retained as `config.json.bak`;
-- new state files are private (`0600`), and existing permissions can be audited
-  or repaired explicitly;
-- QML never writes the catalog directly;
+- new default state directories are created with `0700`, and new or rewritten state
+  files use `0600`; existing state is accepted only when it is not group- or
+  world-writable, while `--doctor` reports looser private modes and
+  `fix-permissions` repairs the default state directory and files to `0700`/`0600`;
+- catalog reads, API responses, helper output and directory scans are bounded;
+- QML never opens or writes the catalog directly and backend processes have deadlines;
 - personal resource data is not automatically synchronized to this GitHub repository.
 
 Set `QOPEN_CONFIG` to use a different catalog with the CLI:
 
 ```bash
-QOPEN_CONFIG=~/Documents/qopen-work.json \
+QOPEN_CONFIG=~/Documents/qopen-work/config.json \
   ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --list
 ```
+
+Use a dedicated directory that is owned by your account and is not group- or
+world-writable. QOpen validates custom state directories but never changes their
+directory permissions.
 
 ## Command-line interface
 
@@ -387,8 +398,7 @@ $QOPEN edit [id]               # Guided edit flow
 $QOPEN remove [id]             # Confirmed removal
 $QOPEN favorite <id> toggle    # Toggle favorite state
 $QOPEN recover                 # Validate and restore config.json.bak
-$QOPEN fix-permissions         # Restrict QOpen state files to mode 0600
-$QOPEN --edit                  # Open raw JSON in the configured editor
+$QOPEN fix-permissions         # Secure the default state directory and files
 $QOPEN --doctor                # Validate dependencies and every item
 $QOPEN --version
 ```
@@ -420,11 +430,15 @@ Omarchy menu / shortcut / bar widget
 ResourceEditor.qml     PathPicker.qml
        |                    |
        +---------+----------+
-                 | argv only
+                 | bounded argv / one-line JSON
+                 v
+         BoundedProcess.qml
+                 |
                  v
               bin/qopen
                  |
-       config lock + validation
+ descriptor-anchored validation
+     + directory FD lock
                  |
                  v
        ~/.config/qopen/config.json
@@ -440,8 +454,25 @@ terminating the entire desktop shell. Version 2.2 briefly used native dialogs;
 2.3 removed them after reproducible Quickshell crashes. The evidence and release
 validation are documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
+User-selected resource browsing intentionally follows symlinks so ordinary
+project and file workflows behave like the filesystem the user selected. That
+browser path is not used for QOpen persistence: catalog, backup, lock and
+replacement operations stay inside the separately validated `SecureStateStore`
+trust boundary.
+
 Commands are passed as argument arrays. Resource values are never concatenated
 into a shell command by QML.
+
+QML does not use `FileView` for the catalog and does not retain complete process
+streams with `StdioCollector`. The Python producer validates and caps every API
+response before writing it; QML then applies a secondary protocol-size check.
+Bounded helper processes run in their own process groups and have real deadlines
+with TERM-to-KILL escalation. Catalog, backup and recovery operations remain
+anchored to one trusted directory descriptor for their complete lifecycle.
+
+Direct raw editing through `$QOPEN --edit` is intentionally disabled because an
+external editor cannot participate in QOpen's lock, validation, backup and atomic
+replacement protocol. Use the native editor or `$QOPEN edit [id]` instead.
 
 ## Updating and removing
 
@@ -499,7 +530,7 @@ mutation. Restore it only after validation:
 
 Before replacing the catalog, QOpen preserves the current invalid file as a
 private timestamped `config.json.invalid-*` snapshot. If `--doctor` reports
-group- or world-readable state files, repair them explicitly:
+insecure default-state permissions, repair them explicitly:
 
 ```bash
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen fix-permissions

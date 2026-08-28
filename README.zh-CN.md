@@ -6,7 +6,7 @@ QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器�
 
 > English summary: QOpen is a curated personal resource launcher for Omarchy. It brings projects, files, documentation, web tools, TUI applications, commands and SSH destinations into one searchable interface with grouping, favorites and native editing.
 
-当前版本：**2.5.0**
+当前版本：**2.5.1**
 
 **文档：** [English](README.md) · [开发记录](DEVELOPMENT.md)
 
@@ -22,7 +22,8 @@ QOpen 是运行在 [Omarchy](https://omarchy.org/) 上的个人资源启动器�
 - 路径字段支持常规键盘粘贴，并提供明确的剪贴板按钮。
 - 在适合时自动推导名称、id、默认分组和图标。
 - 资源行内支持收藏、复制目标、编辑和确认后删除。
-- JSON 写入使用文件锁、原子替换和自动的上一个可用版本备份。
+- JSON 写入锚定目录描述符，并使用目录锁、原子替换和上一个可用版本备份。
+- 后端响应在进入 QML 前受字节上限和真实进程截止时间保护。
 - 支持经过校验的备份恢复，以及显式的私有权限修复命令。
 - 编辑带空格或引号的命令参数时保持无损往返。
 - 可选状态栏组件：左键打开全部资源，右键打开收藏。
@@ -73,7 +74,7 @@ QOpen 会在可用时使用 Omarchy 的启动 helper，并可通过以下命令�
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-2.5.0 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证。这些是已测试版本，并非严格版本锁定。
+2.5.1 发布版本在 Omarchy 4.0.1、Quickshell 0.3.1 和 Qt 6.11.2 上完成开发与验证。这些是已测试版本，并非严格版本锁定。
 
 ## 安装
 
@@ -312,18 +313,26 @@ Project 模式只列出目录，并通过底部按钮选择当前目录。File �
 
 - id 只能包含小写字母、数字、`_` 或 `-`，并且必须唯一；
 - 每次修改都会验证完整目录；
-- 写入使用文件锁和同目录原子替换；
+- 状态目录的每一级都以不跟随符号链接的方式打开；
+- 配置和备份拒绝符号链接、硬链接及非普通文件；
+- 写入锁定可信状态目录描述符，并使用同目录原子替换；
 - 上一个目录版本会保留为 `config.json.bak`；
-- 新状态文件使用私有权限（`0600`），已有文件可显式审计和修复权限；
-- QML 不会直接写入目录；
+- 新建的默认状态目录使用 `0700`，新建或重写的状态文件使用 `0600`；已有状态
+  只有在组用户和其他用户不可写时才会被接受，而 `--doctor` 会报告更宽松的私有
+  权限，`fix-permissions` 可将默认状态目录和状态文件修复为 `0700`/`0600`；
+- 目录读取、API 响应、helper 输出和目录扫描都有明确上限；
+- QML 不会直接打开或写入目录，后端进程也具有真实截止时间；
 - 个人资源数据不会自动同步到这个 GitHub 仓库。
 
 可以设置 `QOPEN_CONFIG`，让 CLI 使用另一份目录：
 
 ```bash
-QOPEN_CONFIG=~/Documents/qopen-work.json \
+QOPEN_CONFIG=~/Documents/qopen-work/config.json \
   ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --list
 ```
+
+请使用由当前账户拥有、且组用户和其他用户不可写的专用目录。QOpen 会验证
+自定义状态目录，但绝不会修改该目录本身的权限。
 
 ## 命令行界面
 
@@ -342,8 +351,7 @@ $QOPEN edit [id]               # 引导式编辑
 $QOPEN remove [id]             # 确认后删除
 $QOPEN favorite <id> toggle    # 切换收藏状态
 $QOPEN recover                 # 校验并恢复 config.json.bak
-$QOPEN fix-permissions         # 将 QOpen 状态文件限制为 0600
-$QOPEN --edit                  # 使用配置的编辑器打开原始 JSON
+$QOPEN fix-permissions         # 保护默认状态目录和状态文件
 $QOPEN --doctor                # 验证依赖和全部条目
 $QOPEN --version
 ```
@@ -374,11 +382,14 @@ Omarchy 菜单 / 快捷键 / 状态栏组件
 ResourceEditor.qml     PathPicker.qml
        |                    |
        +---------+----------+
-                 | 仅传 argv
+                 | 有界 argv / 单行 JSON
+                 v
+         BoundedProcess.qml
+                 |
                  v
               bin/qopen
                  |
-         配置锁 + 完整校验
+   描述符锚定校验 + 目录 FD 锁
                  |
                  v
        ~/.config/qopen/config.json
@@ -388,7 +399,19 @@ QML 负责展示、焦点和交互。Python 负责目录枚举、规范化、校
 
 内嵌路径浏览器刻意避开 Qt `FileDialog`、GTK、GIO 和 GVFS。QOpen 运行在共享的 Omarchy Shell 进程中；不在该进程中接入原生文件对话框，可以避免选择器故障终止整个桌面 Shell。2.2 版本曾短暂使用原生对话框；2.3 在复现 Quickshell 崩溃后将其移除。证据和发布验证记录见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
+用户主动选择的资源浏览会有意跟随符号链接，使普通 project/file 工作流与用户所选
+文件系统路径保持一致。该浏览路径不会用于 QOpen 自身持久化：配置、备份、锁和替换
+始终由经过独立校验的 `SecureStateStore` 信任边界负责。
+
 命令始终以参数数组传递。QML 不会把资源值拼接成 Shell 命令。
+
+QML 不使用 `FileView` 读取目录，也不通过 `StdioCollector` 保留完整进程流。
+Python 生产端会在写出前校验并限制每个 API 响应；QML 随后只执行第二层协议大小检查。
+有界 helper 运行在各自独立的进程组中，并通过 TERM 到 KILL 的升级机制落实真实截止
+时间。配置、备份和恢复在完整生命周期内始终锚定到同一个可信目录描述符。
+
+`$QOPEN --edit` 原始编辑入口已主动禁用，因为外部编辑器无法参与 QOpen 的锁、
+校验、备份和原子替换协议。请改用原生编辑界面或 `$QOPEN edit [id]`。
 
 ## 更新和卸载
 

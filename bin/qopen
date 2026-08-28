@@ -5,17 +5,20 @@ from __future__ import annotations
 
 import argparse
 import copy
+import errno
 import fcntl
 import ipaddress
 import json
 import os
 import re
+import secrets
+import selectors
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import unicodedata
 import urllib.parse
@@ -24,10 +27,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-VERSION = "2.5.0"
-CONFIG_PATH = Path(os.path.expandvars(os.environ.get("QOPEN_CONFIG", "~/.config/qopen/config.json"))).expanduser()
-LOCK_PATH = CONFIG_PATH.with_name(CONFIG_PATH.name + ".lock")
+VERSION = "2.5.1"
+DEFAULT_CONFIG_PATH = Path("~/.config/qopen/config.json").expanduser()
+CONFIG_PATH = Path(os.path.expandvars(os.environ.get(
+    "QOPEN_CONFIG", str(DEFAULT_CONFIG_PATH)
+))).expanduser()
 BACKUP_PATH = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+
+MAX_CONFIG_BYTES = 1024 * 1024
+MAX_API_INPUT_BYTES = 32 * 1024
+MAX_API_OUTPUT_BYTES = 1280 * 1024
+MAX_ERROR_CHARS = 4096
+MAX_ITEMS = 2000
+STATE_LOCK_TIMEOUT_SECONDS = 2.0
+STATE_LOCK_RETRY_SECONDS = 0.02
 
 SUPPORTED_TYPES = {"web", "file", "project", "tui", "command", "ssh"}
 RESERVED_IDS = {"add", "edit", "remove"}
@@ -111,6 +124,8 @@ MENU_WIDTH = 720
 MENU_MAX_HEIGHT = 640
 MENU_SETTLE_SECONDS = 0.08
 PATH_BROWSE_LIMIT = 1000
+PATH_BROWSE_SCAN_LIMIT = 5000
+PATH_BROWSE_TIMEOUT_SECONDS = 1.5
 GROUP_META = {
     "projects": ("󰉋", "Projects", "Directories opened in a terminal"),
     "config": ("󰒓", "Configuration", "Frequently edited configuration files"),
@@ -135,6 +150,10 @@ GROUP_ORDER = tuple(GROUP_META)
 
 
 class QOpenError(Exception):
+    pass
+
+
+class StateFileMissing(QOpenError):
     pass
 
 
@@ -199,7 +218,9 @@ def normalize_url(url: str) -> str:
 
 
 def validate_http_url(url: str, field: str = "URL") -> str:
-    normalized = normalize_url(url)
+    raw = require_safe_text(url, field).strip()
+    has_explicit_scheme = bool(re.match(r"^https?://", raw, re.IGNORECASE))
+    normalized = normalize_url(raw)
     if any(character.isspace() for character in normalized):
         fail(f"{field} must not contain whitespace")
     try:
@@ -214,8 +235,10 @@ def validate_http_url(url: str, field: str = "URL") -> str:
     if port is not None and not 1 <= port <= 65535:
         fail(f"{field} contains an invalid port")
     hostname = parsed.hostname.rstrip(".")
+    is_ip_address = False
     try:
         ipaddress.ip_address(hostname)
+        is_ip_address = True
     except ValueError:
         try:
             ascii_hostname = hostname.encode("idna").decode("ascii")
@@ -228,6 +251,10 @@ def validate_http_url(url: str, field: str = "URL") -> str:
                 or not re.fullmatch(r"[A-Za-z0-9-]+", label)
                 for label in labels)):
             fail(f"{field} contains an invalid host")
+    if (not has_explicit_scheme and not is_ip_address
+            and hostname.lower() != "localhost" and "." not in hostname):
+        fail(f"{field} must be a domain, IP address, localhost, "
+             "or include http:// / https://")
     return normalized
 
 
@@ -308,19 +335,130 @@ def spawn_detached(argv: list[str], cwd: Path | None = None) -> None:
         fail(f"failed to launch {argv[0]}: {exc}")
 
 
+def _signal_process_group(process: subprocess.Popen[bytes], signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_process_group(process, signal.SIGKILL)
+    if process.poll() is None:
+        try:
+            process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def run_bounded(command: list[str], *, input_text: str | None = None,
+                timeout: float, stdout_limit: int, stderr_limit: int = 16 * 1024
+                ) -> subprocess.CompletedProcess[str]:
+    """Run a helper without retaining unbounded output in the QOpen process."""
+    input_data = input_text.encode("utf-8") if input_text is not None else None
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        fail(f"failed to start {command[0]}: {exc}")
+
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    input_offset = 0
+    deadline = time.monotonic() + timeout
+    streams: list[Any] = [process.stdout, process.stderr]
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        if process.stdin is not None:
+            streams.append(process.stdin)
+            os.set_blocking(process.stdin.fileno(), False)
+            selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_process(process)
+                raise subprocess.TimeoutExpired(command, timeout)
+            for key, _events in selector.select(min(0.05, remaining)):
+                stream = key.fileobj
+                channel = key.data
+                if channel == "stdin":
+                    assert process.stdin is not None and input_data is not None
+                    try:
+                        count = os.write(process.stdin.fileno(), input_data[input_offset:input_offset + 65536])
+                    except BrokenPipeError:
+                        count = 0
+                    input_offset += count
+                    if count == 0 or input_offset >= len(input_data):
+                        selector.unregister(stream)
+                        process.stdin.close()
+                    continue
+
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                limit = stdout_limit if channel == "stdout" else stderr_limit
+                output[channel].extend(chunk)
+                if len(output[channel]) > limit:
+                    _stop_process(process)
+                    fail(f"{command[0]} exceeded its {channel} safety limit")
+
+        remaining = max(0.01, deadline - time.monotonic())
+        try:
+            return_code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            _stop_process(process)
+            raise subprocess.TimeoutExpired(command, timeout)
+    finally:
+        selector.close()
+        for stream in streams:
+            if not stream.closed:
+                stream.close()
+
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        output["stdout"].decode("utf-8", errors="replace"),
+        output["stderr"].decode("utf-8", errors="replace"),
+    )
+
+
 # Omarchy compatibility layer
 def ui_select(prompt: str, options: list[str], width: int = MENU_WIDTH,
               max_height: int = MENU_MAX_HEIGHT) -> str | None:
     if not options:
         return None
     require_command("omarchy-menu-select")
+    command = ["omarchy-menu-select", prompt, "--", "--width", str(width),
+               "--maxheight", str(max_height)]
     try:
-        command = ["omarchy-menu-select", prompt, "--", "--width", str(width),
-                   "--maxheight", str(max_height)]
-        result = subprocess.run(command, input="\n".join(options) + "\n",
-                                text=True, capture_output=True, check=False)
-    except OSError as exc:
-        fail(f"failed to start picker: {exc}")
+        result = run_bounded(
+            command,
+            input_text="\n".join(options) + "\n",
+            timeout=3600,
+            stdout_limit=64 * 1024,
+        )
+    except subprocess.TimeoutExpired:
+        fail("picker timed out")
     time.sleep(MENU_SETTLE_SECONDS)
     if result.returncode != 0:
         return None
@@ -331,10 +469,13 @@ def ui_select(prompt: str, options: list[str], width: int = MENU_WIDTH,
 def ui_input(prompt: str) -> str | None:
     require_command("omarchy-menu-input")
     try:
-        result = subprocess.run(["omarchy-menu-input", prompt], text=True,
-                                capture_output=True, check=False)
-    except OSError as exc:
-        fail(f"failed to start input dialog: {exc}")
+        result = run_bounded(
+            ["omarchy-menu-input", prompt],
+            timeout=3600,
+            stdout_limit=16 * 1024,
+        )
+    except subprocess.TimeoutExpired:
+        fail("input dialog timed out")
     time.sleep(MENU_SETTLE_SECONDS)
     if result.returncode != 0:
         return None
@@ -346,9 +487,12 @@ def read_clipboard_text() -> str | None:
     if not has_command("wl-paste"):
         return None
     try:
-        result = subprocess.run(["wl-paste", "--type", "text", "--no-newline"],
-                                text=True, capture_output=True, check=False, timeout=1)
-    except (OSError, subprocess.TimeoutExpired):
+        result = run_bounded(
+            ["wl-paste", "--type", "text", "--no-newline"],
+            timeout=1,
+            stdout_limit=16 * 1024,
+        )
+    except subprocess.TimeoutExpired:
         return None
     if result.returncode != 0:
         return None
@@ -458,6 +602,8 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
     if not isinstance(item_id, str) or not item_id:
         fail(f"{prefix}.id must be a non-empty string")
     require_safe_text(item_id, f"{prefix}.id")
+    if len(item_id) > 128:
+        fail(f"{prefix}.id exceeds 128 characters")
     if not ID_PATTERN.fullmatch(item_id):
         fail(f"invalid id '{item_id}'. Use lowercase letters, numbers, _ or -")
     if item_id in RESERVED_IDS:
@@ -469,6 +615,8 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
     if not isinstance(item.get("name"), str) or not item["name"].strip():
         fail(f"{prefix}.name must be a non-empty string")
     require_safe_text(item["name"], f"{prefix}.name")
+    if len(item["name"]) > 256:
+        fail(f"{prefix}.name exceeds 256 characters")
     item_type = item.get("type")
     if not isinstance(item_type, str) or item_type not in SUPPORTED_TYPES:
         fail(f"unsupported type '{item_type}' for {item_id}")
@@ -477,6 +625,12 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
             fail(f"{prefix}.{field} must be a string")
         if field in item:
             require_safe_text(item[field], f"{prefix}.{field}")
+    if len(str(item.get("group", ""))) > 128:
+        fail(f"{prefix}.group exceeds 128 characters")
+    if len(str(item.get("icon", ""))) > 32:
+        fail(f"{prefix}.icon exceeds 32 characters")
+    if len(str(item.get("description", ""))) > 4096:
+        fail(f"{prefix}.description exceeds 4096 characters")
     if "group" in item and not item["group"].strip():
         fail(f"{prefix}.group must be a non-empty string")
     if "favorite" in item and not isinstance(item["favorite"], bool):
@@ -486,6 +640,8 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
         if not isinstance(item.get("target"), str) or not item["target"].strip():
             fail(f"{prefix}.target must be a non-empty string")
         require_safe_text(item["target"], f"{prefix}.target")
+        if len(item["target"]) > 8192:
+            fail(f"{prefix}.target exceeds 8192 characters")
     if item_type == "web":
         mode = item.get("mode", defaults.get("webMode", "app"))
         if not isinstance(mode, str) or mode not in {"app", "browser"}:
@@ -504,6 +660,8 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
         if not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg for arg in command):
             fail(f"{prefix}.command must be a non-empty string array")
         command_argv(command, f"{prefix}.command")
+        if sum(len(argument) for argument in command) > 8192:
+            fail(f"{prefix}.command exceeds 8192 characters")
     if item_type == "command" and "terminal" in item and not isinstance(item["terminal"], bool):
         fail(f"{prefix}.terminal must be boolean")
     if item_type == "ssh":
@@ -526,154 +684,343 @@ def validate_config(config: Any) -> dict[str, Any]:
     items = config.get("items")
     if not isinstance(items, list):
         fail("items must be an array")
+    if len(items) > MAX_ITEMS:
+        fail(f"items exceeds the {MAX_ITEMS}-resource safety limit")
     seen_ids: set[str] = set()
     for index, item in enumerate(items):
         validate_item(item, defaults, seen_ids, f"items[{index}]")
     return config
 
 
-def read_config_unlocked(create_if_missing: bool = False) -> dict[str, Any]:
-    if not CONFIG_PATH.exists():
-        if create_if_missing:
-            return default_config()
-        fail(f"config not found: {CONFIG_PATH}\nRun: qopen add")
-    try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as file:
-            config = json.load(file)
-    except json.JSONDecodeError as exc:
-        fail(f"invalid config.json (line {exc.lineno}, column {exc.colno}): {exc.msg}")
-    except OSError as exc:
-        fail(f"cannot read config: {exc}")
-    return validate_config(config)
+class SecureStateStore:
+    """Descriptor-anchored access to QOpen's complete state lifecycle."""
 
+    def __init__(self, config_path: Path = CONFIG_PATH,
+                 allow_insecure_directory: bool = False) -> None:
+        self.config_path = config_path
+        self.config_name = config_path.name
+        self.backup_name = f"{self.config_name}.bak"
+        self.allow_insecure_directory = allow_insecure_directory
+        self.dir_fd = -1
+        self.directory_path = config_path.parent
 
-@contextmanager
-def config_lock():
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
-        with os.fdopen(descriptor, "a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    except OSError as exc:
-        fail(f"cannot lock config: {exc}")
+    def __enter__(self) -> "SecureStateStore":
+        if not self.config_path.is_absolute():
+            fail("QOPEN_CONFIG must expand to an absolute path")
+        if self.config_name in {"", ".", ".."} or "/" in self.config_name:
+            fail("QOPEN_CONFIG has an invalid filename")
+        required_flags = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+        if any(not hasattr(os, name) for name in required_flags):
+            fail("secure state-file operations are not supported on this platform")
 
-
-def atomic_write_locked(config: dict[str, Any], backup: bool = True) -> None:
-    validate_config(config)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    original_mode = 0o600
-    if CONFIG_PATH.exists():
-        original_mode = stat.S_IMODE(CONFIG_PATH.stat().st_mode)
-        if backup:
-            try:
-                shutil.copy2(CONFIG_PATH, BACKUP_PATH)
-                if stat.S_IMODE(CONFIG_PATH.stat().st_mode) == 0o600:
-                    os.chmod(BACKUP_PATH, 0o600)
-            except OSError as exc:
-                fail(f"failed to create backup: {exc}")
-
-    fd, temp_name = tempfile.mkstemp(prefix=".qopen-config-", suffix=".tmp", dir=CONFIG_PATH.parent)
-    temp_path = Path(temp_name)
-    try:
-        os.chmod(temp_path, original_mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(config, file, ensure_ascii=False, indent=2)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_path, CONFIG_PATH)
-        directory_fd = os.open(CONFIG_PATH.parent, os.O_DIRECTORY)
+        parent = self.config_path.parent
+        root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        current_fd = root_fd
         try:
-            os.fsync(directory_fd)
+            for component in parent.parts[1:]:
+                if component in {"", ".", ".."}:
+                    fail("QOPEN_CONFIG contains an unsafe directory component")
+                try:
+                    child_fd = os.open(
+                        component,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=current_fd,
+                    )
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(component, 0o700, dir_fd=current_fd)
+                        os.fsync(current_fd)
+                        child_fd = os.open(
+                            component,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            dir_fd=current_fd,
+                        )
+                    except OSError as exc:
+                        fail(f"cannot create secure state directory {parent}: {exc}")
+                except OSError as exc:
+                    fail(f"cannot open secure state directory {parent}: {exc}")
+                if current_fd != root_fd:
+                    os.close(current_fd)
+                current_fd = child_fd
+
+            metadata = os.fstat(current_fd)
+            if not stat.S_ISDIR(metadata.st_mode):
+                fail(f"state path is not a directory: {parent}")
+            if metadata.st_uid != os.geteuid():
+                fail(f"state directory is not owned by the current user: {parent}")
+            mode = stat.S_IMODE(metadata.st_mode)
+            if not self.allow_insecure_directory and mode & 0o022:
+                fail(f"state directory is writable by another account: {parent} ({mode:04o})")
+            self.dir_fd = current_fd
+            self.directory_path = parent
+            if current_fd == root_fd:
+                root_fd = -1
+            current_fd = -1
+            return self
         finally:
-            os.close(directory_fd)
-    except OSError as exc:
-        fail(f"failed to write config: {exc}")
-    finally:
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+            if current_fd >= 0:
+                os.close(current_fd)
+            if root_fd >= 0 and root_fd != current_fd:
+                try:
+                    os.close(root_fd)
+                except OSError:
+                    pass
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        if self.dir_fd >= 0:
+            os.close(self.dir_fd)
+            self.dir_fd = -1
+
+    def path_for(self, name: str) -> Path:
+        return self.directory_path / name
+
+    def _validate_regular(self, fd: int, name: str, label: str,
+                          allow_insecure_mode: bool = False) -> os.stat_result:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            fail(f"{label} is not a regular file: {self.path_for(name)}")
+        if metadata.st_uid != os.geteuid():
+            fail(f"{label} is not owned by the current user: {self.path_for(name)}")
+        if metadata.st_nlink != 1:
+            fail(f"{label} must not have hard links: {self.path_for(name)}")
+        mode = stat.S_IMODE(metadata.st_mode)
+        if not allow_insecure_mode and mode & 0o022:
+            fail(f"{label} is writable by another account: {self.path_for(name)} ({mode:04o})")
+        return metadata
+
+    def open_regular(self, name: str, label: str, writable: bool = False,
+                     allow_insecure_mode: bool = False) -> int:
+        flags = (os.O_RDWR if writable else os.O_RDONLY) | os.O_CLOEXEC
+        flags |= os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(name, flags, dir_fd=self.dir_fd)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            fail(f"cannot open {label}: {exc}")
+        try:
+            self._validate_regular(fd, name, label, allow_insecure_mode)
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def read_bytes(self, name: str, label: str,
+                   limit: int = MAX_CONFIG_BYTES) -> bytes:
+        fd = self.open_regular(name, label)
+        try:
+            before = self._validate_regular(fd, name, label)
+            if before.st_size > limit:
+                fail(f"{label} exceeds the {limit}-byte safety limit")
+            chunks: list[bytes] = []
+            total = 0
+            while total <= limit:
+                chunk = os.read(fd, min(65536, limit + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if total > limit:
+                fail(f"{label} exceeds the {limit}-byte safety limit")
+            after = self._validate_regular(fd, name, label)
+            if (before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns):
+                fail(f"{label} changed while it was being read; retry")
+            return b"".join(chunks)
+        except OSError as exc:
+            fail(f"cannot read {label}: {exc}")
+        finally:
+            os.close(fd)
+
+    def read_config(self, name: str | None = None,
+                    label: str = "config") -> tuple[dict[str, Any], bytes]:
+        target = name or self.config_name
+        try:
+            raw = self.read_bytes(target, label)
+        except FileNotFoundError:
+            raise StateFileMissing(f"QOpen: {label} not found: {self.path_for(target)}")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            fail(f"invalid UTF-8 in {label} at byte {exc.start}")
+        try:
+            config = json.loads(text)
+        except json.JSONDecodeError as exc:
+            fail(f"invalid {label} (line {exc.lineno}, column {exc.colno}): {exc.msg}")
+        except RecursionError:
+            fail(f"invalid {label}: JSON nesting is too deep")
+        return validate_config(config), raw
+
+    @contextmanager
+    def lock(self, exclusive: bool = True):
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(self.dir_fd, operation | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                    fail(f"cannot lock QOpen state directory: {exc}")
+                if time.monotonic() >= deadline:
+                    fail("timed out waiting for the QOpen state lock")
+                time.sleep(STATE_LOCK_RETRY_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(self.dir_fd, fcntl.LOCK_UN)
+
+    def _validate_destination(self, name: str, label: str) -> None:
+        try:
+            fd = self.open_regular(name, label)
+        except FileNotFoundError:
+            return
+        else:
+            os.close(fd)
+
+    def write_atomic(self, name: str, data: bytes, label: str) -> None:
+        if len(data) > MAX_CONFIG_BYTES:
+            fail(f"{label} exceeds the {MAX_CONFIG_BYTES}-byte safety limit")
+        self._validate_destination(name, label)
+        temp_name = f".qopen-{secrets.token_hex(12)}.tmp"
+        temp_fd = -1
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=self.dir_fd,
+            )
+            written = 0
+            while written < len(data):
+                count = os.write(temp_fd, data[written:])
+                if count <= 0:
+                    fail(f"failed to write {label}")
+                written += count
+            os.fchmod(temp_fd, 0o600)
+            os.fsync(temp_fd)
+            os.close(temp_fd)
+            temp_fd = -1
+            os.replace(
+                temp_name,
+                name,
+                src_dir_fd=self.dir_fd,
+                dst_dir_fd=self.dir_fd,
+            )
+            os.fsync(self.dir_fd)
+        except OSError as exc:
+            fail(f"failed to write {label}: {exc}")
+        finally:
+            if temp_fd >= 0:
+                os.close(temp_fd)
+            try:
+                os.unlink(temp_name, dir_fd=self.dir_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+    def write_config(self, config: dict[str, Any], previous: bytes | None,
+                     backup: bool = True) -> None:
+        validate_config(config)
+        serialized = (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        if len(serialized) > MAX_CONFIG_BYTES:
+            fail(f"config exceeds the {MAX_CONFIG_BYTES}-byte safety limit")
+        if backup and previous is not None:
+            self.write_atomic(self.backup_name, previous, "backup")
+        self.write_atomic(self.config_name, serialized, "config")
+
+    def unique_snapshot_name(self) -> str:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        for counter in range(1, 1001):
+            suffix = "" if counter == 1 else f"-{counter}"
+            candidate = f"{self.config_name}.invalid-{timestamp}{suffix}"
+            try:
+                os.stat(candidate, dir_fd=self.dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return candidate
+            except OSError as exc:
+                fail(f"cannot inspect recovery snapshot: {exc}")
+        fail("too many recovery snapshots share the same timestamp")
 
 
-def read_config_path(path: Path, label: str) -> dict[str, Any]:
-    try:
-        with path.open("r", encoding="utf-8") as file:
-            config = json.load(file)
-    except FileNotFoundError:
-        fail(f"{label} not found: {path}")
-    except json.JSONDecodeError as exc:
-        fail(f"invalid {label} (line {exc.lineno}, column {exc.colno}): {exc.msg}")
-    except OSError as exc:
-        fail(f"cannot read {label}: {exc}")
-    return validate_config(config)
-
-
-def recovery_snapshot_path() -> Path:
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    candidate = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.invalid-{timestamp}")
-    counter = 2
-    while candidate.exists():
-        candidate = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.invalid-{timestamp}-{counter}")
-        counter += 1
-    return candidate
+def read_config_unlocked(create_if_missing: bool = False) -> dict[str, Any]:
+    with SecureStateStore() as store, store.lock(exclusive=False):
+        try:
+            config, _raw = store.read_config()
+            return config
+        except StateFileMissing:
+            if create_if_missing:
+                return default_config()
+            raise
 
 
 def recover_backup() -> Path | None:
     """Validate and atomically restore the last-known-good catalog."""
-    with config_lock():
-        backup_config = read_config_path(BACKUP_PATH, "backup")
+    with SecureStateStore() as store, store.lock():
+        backup_config, backup_raw = store.read_config(store.backup_name, "backup")
         snapshot: Path | None = None
-        if CONFIG_PATH.exists():
-            snapshot = recovery_snapshot_path()
-            try:
-                shutil.copy2(CONFIG_PATH, snapshot)
-                os.chmod(snapshot, 0o600)
-            except OSError as exc:
-                fail(f"failed to preserve the current catalog: {exc}")
-        atomic_write_locked(backup_config, backup=False)
         try:
-            os.chmod(CONFIG_PATH, 0o600)
-            os.chmod(BACKUP_PATH, 0o600)
-            os.chmod(LOCK_PATH, 0o600)
-        except OSError as exc:
-            fail(f"catalog restored but permissions could not be secured: {exc}")
+            current_raw = store.read_bytes(store.config_name, "config")
+        except FileNotFoundError:
+            current_raw = None
+        if current_raw is not None:
+            snapshot_name = store.unique_snapshot_name()
+            store.write_atomic(snapshot_name, current_raw, "recovery snapshot")
+            snapshot = store.path_for(snapshot_name)
+        validate_config(backup_config)
+        store.write_atomic(store.config_name, backup_raw, "config")
         return snapshot
 
 
 def fix_permissions() -> list[Path]:
-    """Restrict QOpen state files without changing their contents."""
+    """Restrict QOpen state files without following pathnames."""
     changed: list[Path] = []
-    with config_lock():
-        for path in (CONFIG_PATH, BACKUP_PATH, LOCK_PATH):
-            if not path.exists():
+    with SecureStateStore(allow_insecure_directory=True) as store, store.lock():
+        directory_mode = stat.S_IMODE(os.fstat(store.dir_fd).st_mode)
+        if store.config_path == DEFAULT_CONFIG_PATH and directory_mode != 0o700:
+            os.fchmod(store.dir_fd, 0o700)
+            changed.append(store.directory_path)
+        elif directory_mode & 0o022:
+            fail("custom QOPEN_CONFIG directory is writable by another account; "
+                 "move the catalog into a private directory")
+        for name, label in ((store.config_name, "config"), (store.backup_name, "backup")):
+            try:
+                fd = store.open_regular(name, label, allow_insecure_mode=True)
+            except FileNotFoundError:
                 continue
             try:
-                if stat.S_IMODE(path.stat().st_mode) != 0o600:
-                    os.chmod(path, 0o600)
-                    changed.append(path)
-            except OSError as exc:
-                fail(f"cannot secure {path}: {exc}")
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                    os.fchmod(fd, 0o600)
+                    changed.append(store.path_for(name))
+            finally:
+                os.close(fd)
     return changed
 
 
-def ensure_config() -> None:
-    if CONFIG_PATH.exists():
-        return
-    with config_lock():
-        if not CONFIG_PATH.exists():
-            atomic_write_locked(default_config(), backup=False)
+def ensure_config() -> dict[str, Any]:
+    with SecureStateStore() as store, store.lock():
+        try:
+            config, _raw = store.read_config()
+        except StateFileMissing:
+            config = default_config()
+            store.write_config(config, previous=None, backup=False)
+        return config
 
 
 def mutate_config(mutator: Callable[[dict[str, Any]], Any]) -> Any:
-    with config_lock():
-        config = read_config_unlocked(create_if_missing=True)
+    with SecureStateStore() as store, store.lock():
+        try:
+            config, previous = store.read_config()
+        except StateFileMissing:
+            config = default_config()
+            previous = None
         working = copy.deepcopy(config)
         result = mutator(working)
         validate_config(working)
-        atomic_write_locked(working, backup=CONFIG_PATH.exists())
+        store.write_config(working, previous=previous, backup=previous is not None)
         return result
 
 
@@ -1185,10 +1532,29 @@ def noninteractive_add(argv: list[str]) -> int:
 # Machine API used by the native Omarchy plugin editor. It deliberately keeps
 # all validation and persistence in Python while QML owns only presentation.
 def api_emit(ok: bool, **payload: Any) -> None:
-    print(json.dumps({"ok": ok, **payload}, ensure_ascii=False, separators=(",", ":")))
+    body = {"ok": ok, **payload}
+    if "error" in body:
+        error = "".join(
+            character if ord(character) >= 32 and ord(character) != 127 else " "
+            for character in str(body["error"])
+        )
+        body["error"] = error[:MAX_ERROR_CHARS]
+    try:
+        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        encoded = b'{"ok":false,"error":"QOpen could not serialize the API response"}'
+    if len(encoded) > MAX_API_OUTPUT_BYTES:
+        encoded = b'{"ok":false,"error":"QOpen API response exceeded its safety limit"}'
+    try:
+        sys.stdout.buffer.write(encoded + b"\n")
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        return
 
 
 def parse_api_payload(value: str, field: str) -> dict[str, Any]:
+    if len(value.encode("utf-8")) > MAX_API_INPUT_BYTES:
+        fail(f"{field} exceeds the {MAX_API_INPUT_BYTES}-byte safety limit")
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
@@ -1305,6 +1671,8 @@ def validate_api_item(config: dict[str, Any], item: dict[str, Any],
 
 
 def api_check_target(item_type: str, value: str) -> dict[str, Any]:
+    if len(value.encode("utf-8")) > 8192:
+        fail("value exceeds the 8192-byte safety limit")
     try:
         require_safe_text(value, "value")
     except QOpenError as exc:
@@ -1349,7 +1717,13 @@ def api_check_target(item_type: str, value: str) -> dict[str, Any]:
 def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False,
                     request_id: str = "") -> dict[str, Any]:
     """List one local directory without loading Qt, GTK, GIO or GVFS."""
+    if len(path_value.encode("utf-8")) > 4096:
+        fail("directory path exceeds the 4096-byte safety limit")
+    if len(request_id) > 64:
+        fail("request id exceeds 64 characters")
     path = expand_path(path_value or str(Path.home()))
+    deadline = time.monotonic() + PATH_BROWSE_TIMEOUT_SECONDS
+    scan_truncated = False
     try:
         if path.is_file():
             path = path.parent
@@ -1360,8 +1734,13 @@ def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False,
         path = path.absolute()
 
         entries: list[dict[str, Any]] = []
+        scanned = 0
         with os.scandir(path) as directory:
             for entry in directory:
+                scanned += 1
+                if scanned > PATH_BROWSE_SCAN_LIMIT or time.monotonic() >= deadline:
+                    scan_truncated = True
+                    break
                 if not show_hidden and entry.name.startswith("."):
                     continue
                 try:
@@ -1380,13 +1759,16 @@ def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False,
                     "hidden": entry.name.startswith("."),
                     "symlink": entry.is_symlink(),
                 })
+                if len(entries) > PATH_BROWSE_LIMIT:
+                    scan_truncated = True
+                    break
     except PermissionError:
         fail(f"permission denied: {path}")
     except OSError as exc:
         fail(f"cannot read directory {path}: {exc.strerror or exc}")
 
     entries.sort(key=lambda item: (item["kind"] != "directory", item["name"].casefold()))
-    truncated = len(entries) > PATH_BROWSE_LIMIT
+    truncated = scan_truncated or len(entries) > PATH_BROWSE_LIMIT
     if truncated:
         entries = entries[:PATH_BROWSE_LIMIT]
     parent = path.parent
@@ -1416,6 +1798,7 @@ def api_cli(argv: list[str]) -> int:
     subparsers.add_parser("catalog")
     subparsers.add_parser("recover")
     subparsers.add_parser("fix-permissions")
+    subparsers.add_parser("clipboard-read")
     check_parser = subparsers.add_parser("check-target")
     check_parser.add_argument("--type", required=True, choices=sorted(SUPPORTED_TYPES))
     check_parser.add_argument("--value", required=True)
@@ -1427,6 +1810,15 @@ def api_cli(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.action == "clipboard-read":
+            value = read_clipboard_text()
+            if not value:
+                fail("clipboard is unavailable or does not contain text")
+            first_line = value.strip().splitlines()[0]
+            if len(first_line.encode("utf-8")) > 8192:
+                fail("clipboard text exceeds the 8192-byte safety limit")
+            api_emit(True, result={"text": first_line})
+            return 0
         if args.action == "check-target":
             api_emit(True, result=api_check_target(args.type, args.value))
             return 0
@@ -1435,8 +1827,7 @@ def api_cli(argv: list[str]) -> int:
                                                   args.request_id))
             return 0
         if args.action == "catalog":
-            ensure_config()
-            api_emit(True, action="catalog", result=read_config_unlocked())
+            api_emit(True, action="catalog", result=ensure_config())
             return 0
         if args.action == "recover":
             snapshot = recover_backup()
@@ -1479,12 +1870,7 @@ def api_cli(argv: list[str]) -> int:
 
 
 def edit_config() -> int:
-    ensure_config()
-    config = read_config_unlocked()
-    editor = command_argv(config.get("defaults", {}).get("editor", os.environ.get("EDITOR", "nvim")), "editor")
-    require_command(editor[0])
-    launch_tui([*editor, str(CONFIG_PATH)], "org.qopen.config")
-    return 0
+    fail("direct catalog-file editing is disabled; use QOpen's editor or 'qopen edit <id>'")
 
 
 def doctor() -> int:
@@ -1496,41 +1882,73 @@ def doctor() -> int:
         if not ok:
             failed = True
 
-    def check_private(path: Path, required: bool = True) -> None:
-        if not path.exists():
-            if required:
-                check(False, f"missing state file: {path}")
-            else:
-                print(f"~ optional state file absent: {path}")
-            return
-        mode = stat.S_IMODE(path.stat().st_mode)
-        check(mode == 0o600, f"private permissions {path} ({mode:04o}; expected 0600)")
-
-    check(CONFIG_PATH.exists(), f"config: {CONFIG_PATH}")
-    if not CONFIG_PATH.exists():
-        return 1
-    check_private(CONFIG_PATH)
     try:
-        config = read_config_unlocked()
-        check(True, "config schema")
+        with SecureStateStore(allow_insecure_directory=True) as store:
+            directory_mode = stat.S_IMODE(os.fstat(store.dir_fd).st_mode)
+            expected_directory_mode = directory_mode == 0o700 \
+                if store.config_path == DEFAULT_CONFIG_PATH else not (directory_mode & 0o022)
+            expected_text = "expected 0700" if store.config_path == DEFAULT_CONFIG_PATH \
+                else "must not be group- or world-writable"
+            check(expected_directory_mode,
+                  f"trusted state directory {store.directory_path} "
+                  f"({directory_mode:04o}; {expected_text})")
+            try:
+                with store.lock(exclusive=False):
+                    config, _raw = store.read_config()
+                check(True, f"config: {CONFIG_PATH}")
+                check(True, "config schema")
+            except QOpenError as exc:
+                check(False, str(exc))
+                try:
+                    with store.lock(exclusive=False):
+                        store.read_config(store.backup_name, "backup")
+                    check(True, f"recoverable backup: {BACKUP_PATH}")
+                    print("~ run: qopen recover")
+                except QOpenError as backup_exc:
+                    check(False, str(backup_exc))
+                return 1
+
+            for name, label, required in (
+                    (store.config_name, "config", True),
+                    (store.backup_name, "backup", False)):
+                try:
+                    fd = store.open_regular(name, label, allow_insecure_mode=True)
+                except FileNotFoundError:
+                    if required:
+                        check(False, f"missing state file: {store.path_for(name)}")
+                    else:
+                        print(f"~ optional state file absent: {store.path_for(name)}")
+                    continue
+                except QOpenError as exc:
+                    check(False, str(exc))
+                    continue
+                try:
+                    mode = stat.S_IMODE(os.fstat(fd).st_mode)
+                    check(mode == 0o600,
+                          f"private permissions {store.path_for(name)} "
+                          f"({mode:04o}; expected 0600)")
+                finally:
+                    os.close(fd)
+
+            try:
+                writable_fd = store.open_regular(
+                    store.config_name, "config", writable=True, allow_insecure_mode=True
+                )
+            except (FileNotFoundError, QOpenError):
+                check(False, "config writable")
+            else:
+                os.close(writable_fd)
+                check(True, "config writable")
+            try:
+                with store.lock():
+                    pass
+                check(True, "state directory lock")
+            except QOpenError:
+                check(False, "state directory lock")
     except QOpenError as exc:
         check(False, str(exc))
-        try:
-            read_config_path(BACKUP_PATH, "backup")
-            check(True, f"recoverable backup: {BACKUP_PATH}")
-            print("~ run: qopen recover")
-        except QOpenError as backup_exc:
-            check(False, str(backup_exc))
         return 1
-    check(os.access(CONFIG_PATH, os.W_OK), "config writable")
-    try:
-        with config_lock():
-            pass
-        check(True, "config lock")
-    except QOpenError:
-        check(False, "config lock")
-    check_private(LOCK_PATH)
-    check_private(BACKUP_PATH, required=False)
+
     check(has_command("omarchy-menu-select"), "omarchy-menu-select")
     check(has_command("omarchy-menu-input"), "omarchy-menu-input")
     print(f"{'✓' if has_command('wl-paste') else '~'} wl-paste (clipboard path input)")

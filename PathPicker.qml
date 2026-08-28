@@ -58,7 +58,7 @@ FocusScope {
     root.requestSerial++
     root.pendingPath = ""
     root.pendingRequestSerial = 0
-    if (browseProcess.running) browseProcess.running = false
+    if (browseProcess.running) browseProcess.cancel()
     root.canceled()
   }
 
@@ -78,6 +78,13 @@ FocusScope {
     if (!browseProcess.running) root.startPendingRequest()
   }
 
+  function refreshCurrentPath() {
+    if (!root.opened || root.loading) return
+    var target = root.currentPath
+    if (!target) target = String(pathField.text || "").trim()
+    root.loadPath(target || Quickshell.env("HOME"))
+  }
+
   function startPendingRequest() {
     if (!root.opened || !root.pendingPath || browseProcess.running) return
     var requested = root.pendingPath
@@ -85,10 +92,10 @@ FocusScope {
     root.activeRequestSerial = root.pendingRequestSerial
     root.pendingPath = ""
     root.pendingRequestSerial = 0
-    browseProcess.command = [root.backendPath, "api", "browse-path", "--path", requested,
+    var command = [root.backendPath, "api", "browse-path", "--path", requested,
       "--type", root.resourceType, "--request-id", String(root.activeRequestSerial)]
-    if (hidden) browseProcess.command.push("--show-hidden")
-    browseProcess.running = true
+    if (hidden) command.push("--show-hidden")
+    browseProcess.start(command, root.activeRequestSerial)
   }
 
   function consumeResponse(raw) {
@@ -174,6 +181,11 @@ FocusScope {
     }
     if ((event.modifiers & Qt.AltModifier) && event.key === Qt.Key_Up && root.parentPath) {
       root.loadPath(root.parentPath)
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_F5) {
+      root.refreshCurrentPath()
       event.accepted = true
       return
     }
@@ -269,13 +281,18 @@ FocusScope {
         }
         TextField {
           id: pathField
-          width: parent.width - Style.space(42 * 4) - parent.spacing * 4
+          width: parent.width - Style.space(42 * 5) - parent.spacing * 5
           height: parent.height
           text: root.currentPath
           placeholderText: "Enter a directory path"
           foreground: root.foreground
           onAccepted: root.loadPath(text)
           Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_F5) {
+              root.refreshCurrentPath()
+              event.accepted = true
+              return
+            }
             if (event.key === Qt.Key_Escape) {
               root.forceActiveFocus()
               event.accepted = true
@@ -288,6 +305,14 @@ FocusScope {
           foreground: root.foreground; bordered: true
           enabled: !root.loading
           onClicked: root.loadPath(pathField.text)
+        }
+        Button {
+          width: Style.space(42); height: parent.height
+          iconText: "󰑐"; tooltipText: "Refresh current directory · F5"
+          foreground: root.foreground; bordered: true
+          enabled: root.currentPath !== "" && !root.loading
+          opacity: enabled ? 1 : 0.38
+          onClicked: root.refreshCurrentPath()
         }
         Button {
           width: Style.space(42); height: parent.height
@@ -484,14 +509,16 @@ FocusScope {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: browseProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.consumeResponse(text)
-    }
-    onExited: function(exitCode) {
+    timeoutMs: 3000
+    onFinished: function(response, exitCode, requestId, error) {
       if (!root.opened) return
+      if (requestId === root.requestSerial && !error) root.consumeResponse(response)
+      else if (requestId === root.requestSerial && error) {
+        root.loading = false
+        root.errorText = error
+      }
       if (root.pendingPath) {
         Qt.callLater(root.startPendingRequest)
         return

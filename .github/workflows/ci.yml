@@ -44,7 +44,7 @@ jobs:
           qopen_qmlcachegen=$(find /usr/lib/qt6 -type f -name qmlcachegen -print -quit)
           test -n "$qopen_qmlcachegen"
           qopen_qml_output=$(mktemp -d)
-          for qopen_qml_file in QOpen.qml ResourceEditor.qml PathPicker.qml BarWidget.qml; do
+          for qopen_qml_file in BoundedProcess.qml QOpen.qml ResourceEditor.qml PathPicker.qml BarWidget.qml; do
             "$qopen_qmlcachegen" --only-bytecode \
               -o "$qopen_qml_output/$qopen_qml_file.qmlc" "$qopen_qml_file"
           done

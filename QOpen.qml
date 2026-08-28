@@ -16,7 +16,6 @@ Item {
   readonly property string pluginId: (manifest && manifest.id) || "qopen.launcher"
   readonly property string pluginDir: (manifest && manifest.__sourceDir) || ""
   readonly property string backendPath: pluginDir ? pluginDir + "/bin/qopen" : ""
-  readonly property string configPath: Quickshell.env("HOME") + "/.config/qopen/config.json"
 
   onPluginDirChanged: {
     if (root.pluginDir) root.requestCatalogReload()
@@ -46,6 +45,9 @@ Item {
   property var deleteCandidate: null
   property bool configMissing: false
   property string pendingCopyText: ""
+  property int catalogRequestSerial: 0
+  property int mutationRequestSerial: 0
+  property int apiRequestSerial: 0
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -104,7 +106,7 @@ Item {
     root.pendingBrowse = payload.browse === true
     if (root.shell && typeof root.shell.hide === "function") root.shell.hide("omarchy.menu")
     root.opened = true
-    configFile.reload()
+    root.requestCatalogReload()
     Qt.callLater(function() {
       searchField.text = root.query
       if (!root.pendingAction) {
@@ -143,7 +145,7 @@ Item {
   }
 
   function refresh() {
-    configFile.reload()
+    root.requestCatalogReload()
     return "ok"
   }
 
@@ -192,9 +194,8 @@ Item {
     ].join(" ").toLowerCase()
   }
 
-  function loadConfig(raw) {
+  function loadConfig(parsed) {
     try {
-      var parsed = JSON.parse(raw)
       if (!parsed || !Array.isArray(parsed.items)) throw new Error("items must be an array")
       root.catalog = parsed
       root.configError = ""
@@ -219,8 +220,11 @@ Item {
       return
     }
     root.catalogResponseHandled = false
-    catalogProcess.command = [root.backendPath, "api", "catalog"]
-    catalogProcess.running = true
+    root.catalogRequestSerial++
+    catalogProcess.start(
+      [root.backendPath, "api", "catalog"],
+      root.catalogRequestSerial
+    )
   }
 
   function handleCatalogResponse(raw) {
@@ -237,7 +241,7 @@ Item {
         root.rebuildItems()
         return
       }
-      root.loadConfig(JSON.stringify(response.result || ({})))
+      root.loadConfig(response.result || ({}))
     } catch (e) {
       root.configError = "Invalid catalog response: " + e
       root.configMissing = false
@@ -416,12 +420,6 @@ Item {
     Qt.callLater(function() { Quickshell.execDetached(args) })
   }
 
-  function editRawConfig() {
-    if (!root.backendPath) return
-    root.dismiss()
-    Qt.callLater(function() { Quickshell.execDetached([root.backendPath, "--edit"]) })
-  }
-
   function toggleFavorite(itemId) {
     if (!itemId || mutationProcess.running) return
     root.statusText = "Updating favorite…"
@@ -473,8 +471,8 @@ Item {
   function runMutation(command) {
     if (mutationProcess.running) return
     root.mutationResponseHandled = false
-    mutationProcess.command = command
-    mutationProcess.running = true
+    root.mutationRequestSerial++
+    mutationProcess.start(command, root.mutationRequestSerial)
   }
 
   function handleMutationResponse(raw) {
@@ -495,7 +493,7 @@ Item {
       else
         root.statusText = "Catalog updated"
       root.deleteCandidate = null
-      configFile.reload()
+      root.requestCatalogReload()
       root.statusError = false
       statusTimer.restart()
     } catch (e) {
@@ -509,9 +507,14 @@ Item {
       return
     }
     root.apiResponseHandled = false
-    apiProcess.command = [root.backendPath, "api", action, "--payload", payload]
-    if (action === "update") apiProcess.command.push("--original", originalPayload)
-    apiProcess.running = true
+    if (String(payload || "").length > 32768 || String(originalPayload || "").length > 32768) {
+      resourceEditor.saveFailed("Resource data exceeds the safety limit")
+      return
+    }
+    var command = [root.backendPath, "api", action, "--payload", payload]
+    if (action === "update") command.push("--original", originalPayload)
+    root.apiRequestSerial++
+    apiProcess.start(command, root.apiRequestSerial)
   }
 
   function handleApiResponse(raw) {
@@ -535,7 +538,7 @@ Item {
         + (warnings.length ? " · " + warnings[0] : "")
       root.statusError = false
       statusTimer.restart()
-      configFile.reload()
+      root.requestCatalogReload()
       Qt.callLater(function() { searchField.forceActiveFocus() })
     } catch (e) {
       resourceEditor.saveFailed("Invalid response from QOpen backend")
@@ -545,34 +548,14 @@ Item {
   ListModel { id: groupModel }
   ListModel { id: displayModel }
 
-  FileView {
-    id: configFile
-    path: root.configPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.requestCatalogReload()
-    onLoadFailed: function(error) {
-      root.configError = "Preparing first-run resources…"
-      root.configMissing = true
-      root.catalog = ({ version: 1, defaults: ({}), items: [] })
-      root.rebuildGroups()
-      root.rebuildItems()
-      root.requestCatalogReload()
-    }
-    onFileChanged: reload()
-  }
-
-  Process {
+  BoundedProcess {
     id: catalogProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        catalogFallbackTimer.stop()
-        root.handleCatalogResponse(text)
-      }
-    }
-    onExited: function(exitCode) {
-      if (!root.catalogResponseHandled) catalogFallbackTimer.restart()
+    timeoutMs: 3000
+    onFinished: function(response, exitCode, requestId, error) {
+      if (requestId !== root.catalogRequestSerial) return
+      root.handleCatalogResponse(error
+        ? JSON.stringify({ ok: false, error: error })
+        : response)
       if (root.catalogReloadPending) {
         root.catalogReloadPending = false
         Qt.callLater(root.requestCatalogReload)
@@ -580,31 +563,15 @@ Item {
     }
   }
 
-  Timer {
-    id: catalogFallbackTimer
-    interval: 120
-    onTriggered: root.handleCatalogResponse('{"ok":false,"error":"QOpen catalog validation failed"}')
-  }
-
-  Process {
+  BoundedProcess {
     id: mutationProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        mutationFallbackTimer.stop()
-        root.handleMutationResponse(text)
-      }
+    timeoutMs: 3000
+    onFinished: function(response, exitCode, requestId, error) {
+      if (requestId !== root.mutationRequestSerial) return
+      root.handleMutationResponse(error
+        ? JSON.stringify({ ok: false, error: error })
+        : response)
     }
-    onExited: function(exitCode) {
-      if (!root.mutationResponseHandled)
-        mutationFallbackTimer.restart()
-    }
-  }
-
-  Timer {
-    id: mutationFallbackTimer
-    interval: 120
-    onTriggered: root.handleMutationResponse('{"ok":false,"error":"QOpen backend operation failed"}')
   }
 
   Process {
@@ -617,25 +584,15 @@ Item {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: apiProcess
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        apiFallbackTimer.stop()
-        root.handleApiResponse(text)
-      }
+    timeoutMs: 3000
+    onFinished: function(response, exitCode, requestId, error) {
+      if (requestId !== root.apiRequestSerial) return
+      root.handleApiResponse(error
+        ? JSON.stringify({ ok: false, error: error })
+        : response)
     }
-    onExited: function(exitCode) {
-      if (!root.apiResponseHandled)
-        apiFallbackTimer.restart()
-    }
-  }
-
-  Timer {
-    id: apiFallbackTimer
-    interval: 120
-    onTriggered: root.handleApiResponse('{"ok":false,"error":"QOpen backend failed"}')
   }
 
   Timer {
@@ -762,7 +719,7 @@ Item {
                 root.manage("remove", root.selectedItemId())
                 event.accepted = true
               } else if (ctrl && event.key === Qt.Key_R) {
-                configFile.reload()
+                root.requestCatalogReload()
                 root.statusText = "Catalog reloaded"
                 root.statusError = false
                 statusTimer.restart()
@@ -857,7 +814,7 @@ Item {
               ListView {
                 id: groupList
                 width: parent.width
-                height: parent.height - rawConfigButton.height - parent.spacing * 2 - Style.space(18)
+                height: parent.height - parent.spacing - Style.space(18)
                 model: groupModel
                 clip: true
                 spacing: Style.space(3)
@@ -932,32 +889,6 @@ Item {
                 }
               }
 
-              Rectangle {
-                id: rawConfigButton
-                width: parent.width
-                height: Style.space(36)
-                radius: root.radius
-                color: rawMouse.containsMouse ? root.subtle : "transparent"
-                border.width: 1
-                border.color: root.subtle
-
-                Text {
-                  text: "   Edit raw config"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  anchors.centerIn: parent
-                }
-
-                MouseArea {
-                  id: rawMouse
-                  anchors.fill: parent
-                  enabled: !root.editorOpen
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.editRawConfig()
-                }
-              }
             }
 
             Rectangle {

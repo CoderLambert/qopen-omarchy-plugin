@@ -118,6 +118,7 @@ patch release, then propagate the released commit back to `uat` and `dev`.
 | `QOpen.qml` | Main menu, search, collections, routing, mutations, and status |
 | `ResourceEditor.qml` | Type-aware add/edit form and validation feedback |
 | `PathPicker.qml` | Embedded bounded local file/directory browser |
+| `BoundedProcess.qml` | One-line bounded backend transport and process deadlines |
 | `BarWidget.qml` | Optional Omarchy bar entry point |
 | `bin/qopen` | Python CLI, JSON API, validation, persistence, and launching |
 | `tests/test_backend.py` | Backend, API, safety, and QML regression tests |
@@ -158,6 +159,8 @@ early feedback, but every write and launch must still be validated by Python.
 ### QML changes
 
 - Keep process commands as arrays.
+- Route every backend response through `BoundedProcess.qml`; do not use
+  `StdioCollector` or direct catalog `FileView` access.
 - Keep all file selection inside `PathPicker.qml`.
 - Preserve request ids and stale-response rejection in path browsing.
 - Preserve explicit error feedback for clipboard, target checks, and writes.
@@ -171,11 +174,17 @@ early feedback, but every write and launch must still be validated by Python.
   requirement.
 - Keep machine API output compact JSON and send human diagnostics to the
   appropriate stream.
+- Keep catalog, backup and recovery operations descriptor-anchored to one
+  trusted state directory. Do not reintroduce ordinary pathname reads,
+  `shutil.copy2`, pathname `chmod`, or a pathname lock file.
+- Enforce producer-side byte limits and monotonic deadlines before data reaches
+  QML. Every captured helper subprocess must have bounded output.
 - Create starter resources only when the catalog is missing; preserve existing
   catalogs byte-for-byte during reads and upgrades.
 - Validate the complete catalog before writes, recovery, and rendering.
-- Keep file modes private (`0600`) for configuration, backup, lock, and invalid
-  recovery snapshots.
+- Keep the default state directory private (`0700`) and configuration, backup
+  and invalid recovery snapshots private (`0600`). Never change the parent
+  directory permissions of a custom `QOPEN_CONFIG`.
 - Use `subprocess` argv lists and bounded timeouts where a subprocess can wait.
 - Expand paths only in the backend; do not commit machine-specific absolute
   paths.
@@ -206,7 +215,7 @@ Compile QML with the same strategy as CI:
 qopen_qmlcachegen=$(find /usr/lib/qt6 -type f -name qmlcachegen -print -quit)
 test -n "$qopen_qmlcachegen"
 qopen_qml_output=$(mktemp -d)
-for qopen_qml_file in QOpen.qml ResourceEditor.qml PathPicker.qml BarWidget.qml; do
+for qopen_qml_file in BoundedProcess.qml QOpen.qml ResourceEditor.qml PathPicker.qml BarWidget.qml; do
   "$qopen_qmlcachegen" --only-bytecode \
     -o "$qopen_qml_output/$qopen_qml_file.qmlc" "$qopen_qml_file"
 done
@@ -246,6 +255,8 @@ At minimum, backend changes must cover:
 - command argument round trips, including spaces and quotes;
 - unsafe URL, SSH, and control-character rejection;
 - permission audit and repair;
+- symlink, hard-link, FIFO and non-regular state-file rejection;
+- held-lock, oversized-response and concurrent pathname-race behavior;
 - recovery with valid and invalid backups;
 - project/file browser filtering and stale request behavior.
 

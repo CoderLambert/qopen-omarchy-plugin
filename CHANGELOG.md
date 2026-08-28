@@ -2,6 +2,36 @@
 
 All notable user-facing changes to QOpen are documented here.
 
+## [2.5.1] - 2026-08-28
+
+### Security
+
+- Anchored catalog, backup and recovery operations to a trusted, non-symlinked
+  state-directory descriptor and rejected symlinks, hard links and non-regular
+  state files.
+- Replaced the pathname lock file with a deadline-bound lock on the trusted
+  state-directory descriptor.
+- Added hard limits for catalog reads, API input/output, helper output,
+  resource counts and directory browsing work.
+- Removed direct QML `FileView` catalog access and every unbounded
+  `StdioCollector`; backend calls now use one-line responses and real process
+  deadlines with TERM-to-KILL escalation.
+
+### Changed
+
+- Backups now reuse the exact bytes from the validated pre-mutation catalog.
+- The default state directory is secured to `0700` by the explicit permission
+  repair command; custom `QOPEN_CONFIG` parent permissions are never changed.
+- Direct raw catalog editing through `qopen --edit` is disabled so writes cannot
+  bypass validation, backup and atomic replacement.
+- Path browsing now bounds both returned entries and total scan work.
+
+### Tests
+
+- Added adversarial coverage for parent and state-file symlinks, FIFOs, hard
+  links, oversized catalogs, held locks, unbounded clipboard output and
+  concurrent pathname replacement.
+
 ## [2.5.0] - 2026-08-28
 
 ### Added
