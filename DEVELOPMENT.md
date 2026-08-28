@@ -333,7 +333,8 @@ omarchy restart shell
 1. 更新 `manifest.json` 版本。
 2. 更新 `VERSION` 常量。
 3. 更新 `CHANGELOG.md`。
-4. 检查 README 的当前版本与兼容性说明。
+4. 检查中英文 README 的当前版本、章节顺序、示例与兼容性说明；
+   `tests/test_docs.py` 会阻止双语文档结构和命令示例再次漂移。
 5. 运行 manifest、CLI、目录 API 和 UI 验证。
 6. 搜索绝对路径、凭据、测试数据和生成文件。
 7. 确认源码与用户安装副本一致。
