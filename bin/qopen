@@ -736,6 +736,8 @@ class SecureStateStore:
                 fail(f"state directory is writable by another account: {parent} ({mode:04o})")
             self.dir_fd = current_fd
             self.directory_path = parent
+            if current_fd == root_fd:
+                root_fd = -1
             current_fd = -1
             return self
         finally:

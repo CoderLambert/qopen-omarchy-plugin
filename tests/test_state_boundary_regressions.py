@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -50,6 +54,21 @@ class StateBoundaryRegressionTests(unittest.TestCase):
             timeout=timeout,
         )
         return json.loads(result.stdout)
+
+    def test_root_parent_state_directory_keeps_transferred_descriptor_open(self) -> None:
+        """The root directory FD must stay owned by the store after transfer."""
+        loader = importlib.machinery.SourceFileLoader("qopen_state_boundary", str(QOPEN))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+
+        with mock.patch.object(module.os, "geteuid", return_value=0):
+            with module.SecureStateStore(Path("/config.json")) as store:
+                metadata = os.fstat(store.dir_fd)
+                self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+                self.assertEqual(store.directory_path, Path("/"))
 
     def test_intermediate_parent_symlink_is_rejected(self) -> None:
         """Every ancestor component must be opened with O_NOFOLLOW."""
