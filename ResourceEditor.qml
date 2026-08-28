@@ -499,7 +499,8 @@ Item {
 
       Column {
         id: formColumn
-        width: formFlick.width
+        x: Style.space(2)
+        width: formFlick.width - Style.space(4)
         topPadding: Style.space(16)
         bottomPadding: Style.space(16)
         spacing: Style.space(14)
