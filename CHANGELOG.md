@@ -2,6 +2,39 @@
 
 All notable user-facing changes to QOpen are documented here.
 
+## [2.4.0] - 2026-08-28
+
+### Added
+
+- Validated recovery from `config.json.bak`, with the invalid catalog preserved
+  as a private timestamped snapshot.
+- `qopen recover` and `qopen fix-permissions` maintenance commands.
+- Native JSON API actions for favorites, deletion, recovery and permission repair.
+- Backend-validated catalog reads for the QML interface.
+- Configuration, backup and lock permission checks in `qopen --doctor`.
+- Regression coverage for CRUD conflicts, recovery, permissions, unsafe input and
+  command argument round trips.
+
+### Changed
+
+- Favorite and delete actions stay inside QOpen instead of invoking interactive
+  CLI menus.
+- Command and editor argument arrays use POSIX-safe display quoting when edited.
+- QOpen closes the first-party Omarchy Menu before taking exclusive keyboard focus.
+- Path browsing ignores stale responses and queues the most recent navigation request.
+- Operation status messages remain visible longer and distinguish failures visually.
+
+### Fixed
+
+- Preserved command arguments containing spaces and single quotes after editing.
+- Rejected HTTP(S) URLs without a host, embedded URL credentials, unsafe SSH
+  option-like targets and control characters.
+- Added visible failure feedback for target checks, clipboard reads and clipboard writes.
+- Prevented a completed directory request from replacing a newer PathPicker state.
+- Prevented schema-invalid but syntactically valid JSON from being rendered as a catalog.
+- Deferred the initial catalog process until Omarchy Shell has injected the plugin directory,
+  avoiding an erroneous `/bin/qopen` launch during asynchronous plugin loading.
+
 ## [2.3.0] - 2026-08-28
 
 ### Added

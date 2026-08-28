@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""QOpen v1.1: a safe, user-level resource launcher for Omarchy."""
+"""QOpen: a safe, user-level resource launcher for Omarchy."""
 
 from __future__ import annotations
 
 import argparse
 import copy
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 CONFIG_PATH = Path(os.path.expandvars(os.environ.get("QOPEN_CONFIG", "~/.config/qopen/config.json"))).expanduser()
 LOCK_PATH = CONFIG_PATH.with_name(CONFIG_PATH.name + ".lock")
 BACKUP_PATH = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
@@ -78,8 +79,16 @@ def fail(message: str) -> None:
     raise QOpenError(message if message.startswith("QOpen:") else f"QOpen: {message}")
 
 
+def require_safe_text(value: str, field: str) -> str:
+    """Reject control characters before values reach paths or subprocess argv."""
+    for character in value:
+        if ord(character) < 32 or ord(character) == 127:
+            fail(f"{field} contains a control character")
+    return value
+
+
 def normalize_path_input(value: str) -> str:
-    value = value.strip()
+    value = require_safe_text(value, "path").strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1].strip()
     if value.lower().startswith("file://"):
@@ -105,8 +114,11 @@ def command_argv(value: Any, field: str) -> list[str]:
     if isinstance(value, list):
         if not value or any(not isinstance(arg, str) or not arg for arg in value):
             fail(f"{field} must contain non-empty strings")
+        for arg in value:
+            require_safe_text(arg, field)
         return expand_argv(value)
     if isinstance(value, str) and value.strip():
+        require_safe_text(value, field)
         try:
             return expand_argv(shlex.split(value))
         except ValueError as exc:
@@ -114,13 +126,57 @@ def command_argv(value: Any, field: str) -> list[str]:
     fail(f"{field} must be a string or string array")
 
 
-def clean_text(value: Any) -> str:
-    return str(value).replace("\t", " ").replace("\n", " ").replace("\r", " ").strip()
+def clean_text(value: Any, field: str = "value") -> str:
+    return require_safe_text(str(value), field).strip()
 
 
 def normalize_url(url: str) -> str:
-    url = url.strip()
+    url = require_safe_text(url, "URL").strip()
     return url if re.match(r"^https?://", url, re.IGNORECASE) else f"https://{url}"
+
+
+def validate_http_url(url: str, field: str = "URL") -> str:
+    normalized = normalize_url(url)
+    if any(character.isspace() for character in normalized):
+        fail(f"{field} must not contain whitespace")
+    try:
+        parsed = urllib.parse.urlsplit(normalized)
+        port = parsed.port
+    except ValueError as exc:
+        fail(f"invalid {field}: {exc}")
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        fail(f"{field} must be an HTTP or HTTPS URL with a host")
+    if parsed.username is not None or parsed.password is not None:
+        fail(f"{field} must not contain embedded credentials")
+    if port is not None and not 1 <= port <= 65535:
+        fail(f"{field} contains an invalid port")
+    hostname = parsed.hostname.rstrip(".")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError:
+            fail(f"{field} contains an invalid host")
+        labels = ascii_hostname.split(".")
+        if (len(ascii_hostname) > 253 or any(
+                not label or len(label) > 63
+                or label.startswith("-") or label.endswith("-")
+                or not re.fullmatch(r"[A-Za-z0-9-]+", label)
+                for label in labels)):
+            fail(f"{field} contains an invalid host")
+    return normalized
+
+
+def validate_ssh_target(value: str, field: str = "SSH target") -> str:
+    target = require_safe_text(value, field).strip()
+    if not target:
+        fail(f"{field} is required")
+    if target.startswith("-"):
+        fail(f"{field} must not start with '-'")
+    if any(character.isspace() for character in target):
+        fail(f"{field} must not contain whitespace")
+    return target
 
 
 def slugify(value: str) -> str:
@@ -243,7 +299,7 @@ def path_clipboard_value(value: str) -> str:
 
 
 def path_preview(value: str, limit: int = 88) -> str:
-    preview = clean_text(value)
+    preview = value.replace("\t", " ").replace("\n", " ").replace("\r", " ").strip()
     return preview if len(preview) <= limit else preview[:limit - 1] + "…"
 
 
@@ -334,6 +390,7 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
     item_id = item.get("id")
     if not isinstance(item_id, str) or not item_id:
         fail(f"{prefix}.id must be a non-empty string")
+    require_safe_text(item_id, f"{prefix}.id")
     if not ID_PATTERN.fullmatch(item_id):
         fail(f"invalid id '{item_id}'. Use lowercase letters, numbers, _ or -")
     if item_id in RESERVED_IDS:
@@ -344,12 +401,15 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
 
     if not isinstance(item.get("name"), str) or not item["name"].strip():
         fail(f"{prefix}.name must be a non-empty string")
+    require_safe_text(item["name"], f"{prefix}.name")
     item_type = item.get("type")
     if not isinstance(item_type, str) or item_type not in SUPPORTED_TYPES:
         fail(f"unsupported type '{item_type}' for {item_id}")
     for field in ("group", "icon", "description"):
         if field in item and not isinstance(item[field], str):
             fail(f"{prefix}.{field} must be a string")
+        if field in item:
+            require_safe_text(item[field], f"{prefix}.{field}")
     if "group" in item and not item["group"].strip():
         fail(f"{prefix}.group must be a non-empty string")
     if "favorite" in item and not isinstance(item["favorite"], bool):
@@ -358,14 +418,16 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
     if item_type in {"web", "file", "project", "ssh"}:
         if not isinstance(item.get("target"), str) or not item["target"].strip():
             fail(f"{prefix}.target must be a non-empty string")
+        require_safe_text(item["target"], f"{prefix}.target")
     if item_type == "web":
         mode = item.get("mode", defaults.get("webMode", "app"))
         if not isinstance(mode, str) or mode not in {"app", "browser"}:
             fail(f"{prefix}.mode must be app or browser")
-        if not re.match(r"^https?://", normalize_url(item["target"]), re.IGNORECASE):
-            fail(f"{prefix}.target must be an http:// or https:// URL")
+        validate_http_url(item["target"], f"{prefix}.target")
         if "focus" in item and not isinstance(item["focus"], str):
             fail(f"{prefix}.focus must be a string")
+        if "focus" in item:
+            require_safe_text(item["focus"], f"{prefix}.focus")
         if item.get("focus") and mode != "app":
             fail(f"{prefix}.focus requires mode=app")
     if item_type == "file" and "editor" in item:
@@ -374,8 +436,11 @@ def validate_item(item: Any, defaults: dict[str, Any], seen_ids: set[str], prefi
         command = item.get("command")
         if not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg for arg in command):
             fail(f"{prefix}.command must be a non-empty string array")
+        command_argv(command, f"{prefix}.command")
     if item_type == "command" and "terminal" in item and not isinstance(item["terminal"], bool):
         fail(f"{prefix}.terminal must be boolean")
+    if item_type == "ssh":
+        validate_ssh_target(item["target"], f"{prefix}.target")
 
 
 def validate_config(config: Any) -> dict[str, Any]:
@@ -419,7 +484,8 @@ def read_config_unlocked(create_if_missing: bool = False) -> dict[str, Any]:
 def config_lock():
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+        descriptor = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 yield
@@ -438,6 +504,8 @@ def atomic_write_locked(config: dict[str, Any], backup: bool = True) -> None:
         if backup:
             try:
                 shutil.copy2(CONFIG_PATH, BACKUP_PATH)
+                if stat.S_IMODE(CONFIG_PATH.stat().st_mode) == 0o600:
+                    os.chmod(BACKUP_PATH, 0o600)
             except OSError as exc:
                 fail(f"failed to create backup: {exc}")
 
@@ -461,6 +529,67 @@ def atomic_write_locked(config: dict[str, Any], backup: bool = True) -> None:
     finally:
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
+
+
+def read_config_path(path: Path, label: str) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            config = json.load(file)
+    except FileNotFoundError:
+        fail(f"{label} not found: {path}")
+    except json.JSONDecodeError as exc:
+        fail(f"invalid {label} (line {exc.lineno}, column {exc.colno}): {exc.msg}")
+    except OSError as exc:
+        fail(f"cannot read {label}: {exc}")
+    return validate_config(config)
+
+
+def recovery_snapshot_path() -> Path:
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.invalid-{timestamp}")
+    counter = 2
+    while candidate.exists():
+        candidate = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.invalid-{timestamp}-{counter}")
+        counter += 1
+    return candidate
+
+
+def recover_backup() -> Path | None:
+    """Validate and atomically restore the last-known-good catalog."""
+    with config_lock():
+        backup_config = read_config_path(BACKUP_PATH, "backup")
+        snapshot: Path | None = None
+        if CONFIG_PATH.exists():
+            snapshot = recovery_snapshot_path()
+            try:
+                shutil.copy2(CONFIG_PATH, snapshot)
+                os.chmod(snapshot, 0o600)
+            except OSError as exc:
+                fail(f"failed to preserve the current catalog: {exc}")
+        atomic_write_locked(backup_config, backup=False)
+        try:
+            os.chmod(CONFIG_PATH, 0o600)
+            os.chmod(BACKUP_PATH, 0o600)
+            os.chmod(LOCK_PATH, 0o600)
+        except OSError as exc:
+            fail(f"catalog restored but permissions could not be secured: {exc}")
+        return snapshot
+
+
+def fix_permissions() -> list[Path]:
+    """Restrict QOpen state files without changing their contents."""
+    changed: list[Path] = []
+    with config_lock():
+        for path in (CONFIG_PATH, BACKUP_PATH, LOCK_PATH):
+            if not path.exists():
+                continue
+            try:
+                if stat.S_IMODE(path.stat().st_mode) != 0o600:
+                    os.chmod(path, 0o600)
+                    changed.append(path)
+            except OSError as exc:
+                fail(f"cannot secure {path}: {exc}")
+    return changed
 
 
 def ensure_config() -> None:
@@ -693,6 +822,7 @@ def choose_group(config: dict[str, Any], fallback: str) -> str | None:
 
 
 def parse_command_input(value: str) -> list[str]:
+    require_safe_text(value, "command")
     try:
         argv = shlex.split(value)
     except ValueError as exc:
@@ -1001,20 +1131,44 @@ def parse_api_payload(value: str, field: str) -> dict[str, Any]:
     return parsed
 
 
+def validate_api_original(original: dict[str, Any]) -> dict[str, Any]:
+    item_id = original.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        fail("original.id must be a non-empty string")
+    require_safe_text(item_id, "original.id")
+    return original
+
+
+def api_text(raw: dict[str, Any], field: str, label: str | None = None) -> str:
+    value = raw.get(field, "")
+    if not isinstance(value, str):
+        fail(f"{label or field} must be a string")
+    return clean_text(value, label or field)
+
+
+def api_boolean(raw: dict[str, Any], field: str, default: bool = False) -> bool:
+    if field not in raw:
+        return default
+    value = raw[field]
+    if not isinstance(value, bool):
+        fail(f"{field} must be boolean")
+    return value
+
+
 def normalize_api_item(raw: dict[str, Any], config: dict[str, Any],
                        original: dict[str, Any] | None = None) -> dict[str, Any]:
-    item_type = clean_text(raw.get("type", ""))
+    item_type = api_text(raw, "type")
     if item_type not in SUPPORTED_TYPES:
         fail(f"unsupported type '{item_type}'")
 
-    name = clean_text(raw.get("name", ""))
+    name = api_text(raw, "name")
     if not name:
         fail("name is required")
 
     existing_ids = {item["id"] for item in config["items"]}
-    if original:
+    if original is not None:
         existing_ids.discard(original["id"])
-    requested_id = clean_text(raw.get("id", ""))
+    requested_id = api_text(raw, "id")
     item_id = requested_id or unique_id(slugify(name), existing_ids)
     if item_id in existing_ids:
         fail(f"item already exists: {item_id}")
@@ -1023,27 +1177,27 @@ def normalize_api_item(raw: dict[str, Any], config: dict[str, Any],
         "id": item_id,
         "name": name,
         "type": item_type,
-        "group": clean_text(raw.get("group", "")) or DEFAULT_GROUPS[item_type],
-        "icon": clean_text(raw.get("icon", "")) or DEFAULT_ICONS[item_type],
+        "group": api_text(raw, "group") or DEFAULT_GROUPS[item_type],
+        "icon": api_text(raw, "icon") or DEFAULT_ICONS[item_type],
     }
-    description = clean_text(raw.get("description", ""))
+    description = api_text(raw, "description")
     if description:
         item["description"] = description
-    if bool(raw.get("favorite", False)):
+    if api_boolean(raw, "favorite"):
         item["favorite"] = True
 
     if item_type == "web":
-        target = clean_text(raw.get("target", ""))
+        target = api_text(raw, "target", "URL")
         if not target:
             fail("URL is required")
-        item["target"] = normalize_url(target)
-        item["mode"] = clean_text(raw.get("mode", "")) or config.get("defaults", {}).get("webMode", "app")
-        focus = clean_text(raw.get("focus", ""))
+        item["target"] = validate_http_url(target)
+        item["mode"] = api_text(raw, "mode", "web mode") or config.get("defaults", {}).get("webMode", "app")
+        focus = api_text(raw, "focus")
         if focus:
             item["focus"] = focus
             item["mode"] = "app"
     elif item_type in {"file", "project"}:
-        target = clean_text(raw.get("target", ""))
+        target = api_text(raw, "target", "path")
         if not target:
             fail("path is required")
         item["target"] = normalize_path_input(target)
@@ -1052,16 +1206,13 @@ def normalize_api_item(raw: dict[str, Any], config: dict[str, Any],
             if isinstance(editor, str) and editor.strip():
                 item["editor"] = parse_command_input(editor)
             elif isinstance(editor, list) and editor:
-                item["editor"] = editor
+                item["editor"] = command_argv(editor, "editor")
     elif item_type == "ssh":
-        target = clean_text(raw.get("target", ""))
-        if not target:
-            fail("SSH host is required")
-        item["target"] = target
+        item["target"] = validate_ssh_target(api_text(raw, "target", "SSH target"))
     else:
         command = raw.get("command", "")
-        item["command"] = parse_command_input(command) if isinstance(command, str) else command
-        if item_type == "command" and bool(raw.get("terminal", False)):
+        item["command"] = parse_command_input(command) if isinstance(command, str) else command_argv(command, "command")
+        if item_type == "command" and api_boolean(raw, "terminal"):
             item["terminal"] = True
 
     return item
@@ -1087,14 +1238,20 @@ def validate_api_item(config: dict[str, Any], item: dict[str, Any],
 
 
 def api_check_target(item_type: str, value: str) -> dict[str, Any]:
+    try:
+        require_safe_text(value, "value")
+    except QOpenError as exc:
+        return {"valid": False, "level": "error", "message": str(exc), "normalized": ""}
     value = value.strip()
     if not value:
         return {"valid": False, "level": "error", "message": "A value is required", "normalized": ""}
     if item_type == "web":
-        normalized = normalize_url(value)
-        valid = bool(re.match(r"^https?://[^\s]+$", normalized, re.IGNORECASE))
-        return {"valid": valid, "level": "ok" if valid else "error",
-                "message": "Valid web URL" if valid else "Enter a valid HTTP or HTTPS URL",
+        try:
+            normalized = validate_http_url(value)
+        except QOpenError as exc:
+            return {"valid": False, "level": "error", "message": str(exc),
+                    "normalized": normalize_url(value)}
+        return {"valid": True, "level": "ok", "message": "Valid web URL",
                 "normalized": normalized}
     if item_type in {"file", "project"}:
         normalized = normalize_path_input(value)
@@ -1114,11 +1271,16 @@ def api_check_target(item_type: str, value: str) -> dict[str, Any]:
                 "message": "Command is available" if found else f"Command not found: {argv[0]}",
                 "normalized": value}
     if item_type == "ssh":
-        return {"valid": True, "level": "ok", "message": "SSH destination", "normalized": value}
+        try:
+            normalized = validate_ssh_target(value)
+        except QOpenError as exc:
+            return {"valid": False, "level": "error", "message": str(exc), "normalized": value}
+        return {"valid": True, "level": "ok", "message": "SSH destination", "normalized": normalized}
     return {"valid": False, "level": "error", "message": "Unsupported resource type", "normalized": value}
 
 
-def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False) -> dict[str, Any]:
+def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False,
+                    request_id: str = "") -> dict[str, Any]:
     """List one local directory without loading Qt, GTK, GIO or GVFS."""
     path = expand_path(path_value or str(Path.home()))
     try:
@@ -1162,6 +1324,7 @@ def api_browse_path(path_value: str, item_type: str, show_hidden: bool = False) 
         entries = entries[:PATH_BROWSE_LIMIT]
     parent = path.parent
     return {
+        "requestId": request_id,
         "path": str(path),
         "parent": "" if parent == path else str(parent),
         "entries": entries,
@@ -1180,6 +1343,12 @@ def api_cli(argv: list[str]) -> int:
     update_parser.add_argument("--original", required=True)
     delete_parser = subparsers.add_parser("delete")
     delete_parser.add_argument("--original", required=True)
+    favorite_parser = subparsers.add_parser("favorite")
+    favorite_parser.add_argument("--id", required=True)
+    favorite_parser.add_argument("--mode", choices=("toggle", "on", "off"), default="toggle")
+    subparsers.add_parser("catalog")
+    subparsers.add_parser("recover")
+    subparsers.add_parser("fix-permissions")
     check_parser = subparsers.add_parser("check-target")
     check_parser.add_argument("--type", required=True, choices=sorted(SUPPORTED_TYPES))
     check_parser.add_argument("--value", required=True)
@@ -1187,6 +1356,7 @@ def api_cli(argv: list[str]) -> int:
     browse_parser.add_argument("--path", required=True)
     browse_parser.add_argument("--type", required=True, choices=("file", "project"))
     browse_parser.add_argument("--show-hidden", action="store_true")
+    browse_parser.add_argument("--request-id", default="")
     args = parser.parse_args(argv)
 
     try:
@@ -1194,18 +1364,34 @@ def api_cli(argv: list[str]) -> int:
             api_emit(True, result=api_check_target(args.type, args.value))
             return 0
         if args.action == "browse-path":
-            api_emit(True, result=api_browse_path(args.path, args.type, args.show_hidden))
+            api_emit(True, result=api_browse_path(args.path, args.type, args.show_hidden,
+                                                  args.request_id))
+            return 0
+        if args.action == "catalog":
+            api_emit(True, action="catalog", result=read_config_unlocked())
+            return 0
+        if args.action == "recover":
+            snapshot = recover_backup()
+            api_emit(True, action="recover", snapshot=str(snapshot) if snapshot else "")
+            return 0
+        if args.action == "fix-permissions":
+            changed = fix_permissions()
+            api_emit(True, action="fix-permissions", changed=[str(path) for path in changed])
             return 0
 
         ensure_config()
         config = read_config_unlocked()
+        if args.action == "favorite":
+            enabled = set_favorite(args.id, args.mode)
+            api_emit(True, action="favorite", id=args.id, favorite=enabled)
+            return 0
         if args.action == "delete":
-            original = parse_api_payload(args.original, "original")
+            original = validate_api_original(parse_api_payload(args.original, "original"))
             remove_item(original)
             api_emit(True, action="delete", item=original)
             return 0
 
-        original = parse_api_payload(args.original, "original") if args.action == "update" else None
+        original = validate_api_original(parse_api_payload(args.original, "original")) if args.action == "update" else None
         raw = parse_api_payload(args.payload, "payload")
         item = normalize_api_item(raw, config, original)
         warnings = validate_api_item(config, item, original)
@@ -1242,14 +1428,31 @@ def doctor() -> int:
         if not ok:
             failed = True
 
+    def check_private(path: Path, required: bool = True) -> None:
+        if not path.exists():
+            if required:
+                check(False, f"missing state file: {path}")
+            else:
+                print(f"~ optional state file absent: {path}")
+            return
+        mode = stat.S_IMODE(path.stat().st_mode)
+        check(mode == 0o600, f"private permissions {path} ({mode:04o}; expected 0600)")
+
     check(CONFIG_PATH.exists(), f"config: {CONFIG_PATH}")
     if not CONFIG_PATH.exists():
         return 1
+    check_private(CONFIG_PATH)
     try:
         config = read_config_unlocked()
         check(True, "config schema")
     except QOpenError as exc:
         check(False, str(exc))
+        try:
+            read_config_path(BACKUP_PATH, "backup")
+            check(True, f"recoverable backup: {BACKUP_PATH}")
+            print("~ run: qopen recover")
+        except QOpenError as backup_exc:
+            check(False, str(backup_exc))
         return 1
     check(os.access(CONFIG_PATH, os.W_OK), "config writable")
     try:
@@ -1258,6 +1461,8 @@ def doctor() -> int:
         check(True, "config lock")
     except QOpenError:
         check(False, "config lock")
+    check_private(LOCK_PATH)
+    check_private(BACKUP_PATH, required=False)
     check(has_command("omarchy-menu-select"), "omarchy-menu-select")
     check(has_command("omarchy-menu-input"), "omarchy-menu-input")
     print(f"{'✓' if has_command('wl-paste') else '~'} wl-paste (clipboard path input)")
@@ -1324,6 +1529,21 @@ def main() -> int:
         args = parser.parse_args(raw_args[1:])
         enabled = set_favorite(args.item_id, args.mode)
         user_message(f"{'★' if enabled else '☆'} Favorite {'enabled' if enabled else 'disabled'}: {args.item_id}")
+        return 0
+    if raw_args and raw_args[0] == "recover":
+        parser = argparse.ArgumentParser(prog="qopen recover")
+        parser.parse_args(raw_args[1:])
+        snapshot = recover_backup()
+        message = "✓ Restored the last valid backup"
+        if snapshot:
+            message += f"; previous catalog saved as {snapshot}"
+        user_message(message)
+        return 0
+    if raw_args and raw_args[0] == "fix-permissions":
+        parser = argparse.ArgumentParser(prog="qopen fix-permissions")
+        parser.parse_args(raw_args[1:])
+        changed = fix_permissions()
+        user_message(f"✓ Secured QOpen state files ({len(changed)} changed)")
         return 0
 
     parser = normal_parser()

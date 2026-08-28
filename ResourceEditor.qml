@@ -36,6 +36,7 @@ Item {
   property string targetStatus: ""
   property string targetLevel: ""
   property string expandedTarget: ""
+  property string clipboardOutput: ""
 
   readonly property color foreground: Color.menu.text
   readonly property color background: Color.menu.background
@@ -73,6 +74,20 @@ Item {
     var slug = String(value || "").toLowerCase()
       .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
     return slug || "item"
+  }
+
+  function shellQuote(value) {
+    var text = String(value)
+    if (text === "") return "''"
+    if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(text)) return text
+    return "'" + text.replace(/'/g, "'\"'\"'") + "'"
+  }
+
+  function argvToCommand(argv) {
+    if (!Array.isArray(argv)) return String(argv || "")
+    var quoted = []
+    for (var i = 0; i < argv.length; i++) quoted.push(root.shellQuote(argv[i]))
+    return quoted.join(" ")
   }
 
   function markDirty() {
@@ -123,10 +138,10 @@ Item {
     root.descriptionValue = String(item.description || "")
     root.iconValue = String(item.icon || root.defaultIcons[root.selectedType])
     root.targetValue = String(item.target || "")
-    root.commandValue = Array.isArray(item.command) ? item.command.join(" ") : String(item.command || "")
+    root.commandValue = root.argvToCommand(item.command)
     root.webModeValue = String(item.mode || "app")
     root.focusValue = String(item.focus || "")
-    root.editorValue = Array.isArray(item.editor) ? item.editor.join(" ") : String(item.editor || "")
+    root.editorValue = root.argvToCommand(item.editor)
     root.favoriteValue = item.favorite === true
     root.terminalValue = item.terminal === true
     root.idTouched = true
@@ -262,6 +277,9 @@ Item {
 
   function useClipboard() {
     if (clipboardProcess.running) return
+    root.clipboardOutput = ""
+    root.targetStatus = "Reading clipboard…"
+    root.targetLevel = ""
     clipboardProcess.command = ["wl-paste", "--type", "text", "--no-newline"]
     clipboardProcess.running = true
   }
@@ -327,13 +345,19 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var value = String(text || "").trim().split("\n")[0]
-        if (!value) return
-        root.setPrimaryValue(value)
-        primaryField.text = value
-        root.markDirty()
-        Qt.callLater(root.checkTarget)
+        root.clipboardOutput = String(text || "").trim().split("\n")[0]
       }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 || !root.clipboardOutput) {
+        root.targetStatus = "Clipboard is unavailable or does not contain text"
+        root.targetLevel = "error"
+        return
+      }
+      root.setPrimaryValue(root.clipboardOutput)
+      primaryField.text = root.clipboardOutput
+      root.markDirty()
+      Qt.callLater(root.checkTarget)
     }
   }
 
@@ -344,6 +368,12 @@ Item {
       onStreamFinished: {
         try {
           var response = JSON.parse(String(text || "{}"))
+          if (!response.ok) {
+            root.targetStatus = String(response.error || "Could not validate this value")
+            root.targetLevel = "error"
+            root.expandedTarget = ""
+            return
+          }
           var result = response.result || ({})
           root.targetStatus = String(result.message || "")
           root.targetLevel = String(result.level || "")

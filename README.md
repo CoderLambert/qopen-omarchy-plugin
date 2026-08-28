@@ -11,7 +11,7 @@ something you chose to keep, describe, group and find again.
 > 而是把项目目录、文件、常用文档、前端生态网站、TUI、命令和 SSH 目标集中到
 > 一个支持搜索、分组、收藏与原生编辑的界面中。
 
-Current release: **2.3.0**
+Current release: **2.4.0**
 
 **Documentation:** [简体中文](README.zh-CN.md) · [Development record](DEVELOPMENT.md)
 
@@ -27,6 +27,8 @@ Current release: **2.3.0**
 - Automatic name, id, default group and icon inference where appropriate.
 - Inline favorite, copy-target, edit and confirmed remove actions.
 - Atomic JSON writes with locking and an automatic last-known-good backup.
+- Validated backup recovery and explicit private-permission repair commands.
+- Lossless editing of command arguments containing spaces or quotes.
 - Optional bar widget: left-click opens all resources; right-click opens favorites.
 - Standalone CLI for launching, inspection, CRUD and diagnostics.
 
@@ -73,9 +75,9 @@ Apps, Install, Update or System inside QOpen would create unnecessary duplicatio
 The QOpen submenu inside Omarchy Menu is an optional bridge, and its bar widget
 is also optional. Both menus are full-screen overlay surfaces with exclusive
 keyboard focus. Launching QOpen from an Omarchy Menu action is safe because the
-stock menu closes before running the action. If separate shortcuts are invoked
-while the other menu is still open, both overlays can remain mounted; press
-Escape to close the active overlay before switching to the other one.
+stock menu closes before running the action. QOpen also asks Omarchy Shell to
+hide `omarchy.menu` whenever it opens, so invoking its separate shortcut while
+the stock menu is visible does not leave two exclusive-focus overlays mounted.
 
 ## Requirements
 
@@ -92,7 +94,7 @@ environment with:
 ~/.config/omarchy/plugins/qopen.launcher/bin/qopen --doctor
 ```
 
-The 2.3.0 release was developed and verified on Omarchy 4.0.1, Quickshell
+The 2.4.0 release was developed and verified on Omarchy 4.0.1, Quickshell
 0.3.1 and Qt 6.11.2. These are tested versions, not strict pins.
 
 ## Installation
@@ -335,6 +337,8 @@ Important guarantees:
 - each mutation validates the complete catalog;
 - writes use a lock and same-directory atomic replacement;
 - the previous catalog is retained as `config.json.bak`;
+- new state files are private (`0600`), and existing permissions can be audited
+  or repaired explicitly;
 - QML never writes the catalog directly;
 - personal resource data is not automatically synchronized to this GitHub repository.
 
@@ -361,6 +365,8 @@ $QOPEN add                     # Guided add flow
 $QOPEN edit [id]               # Guided edit flow
 $QOPEN remove [id]             # Confirmed removal
 $QOPEN favorite <id> toggle    # Toggle favorite state
+$QOPEN recover                 # Validate and restore config.json.bak
+$QOPEN fix-permissions         # Restrict QOpen state files to mode 0600
 $QOPEN --edit                  # Open raw JSON in the configured editor
 $QOPEN --doctor                # Validate dependencies and every item
 $QOPEN --version
@@ -464,7 +470,19 @@ QOpen refuses partial or malformed writes. Inspect:
 ```
 
 The backup is the catalog state immediately before the last successful
-mutation.
+mutation. Restore it only after validation:
+
+```bash
+~/.config/omarchy/plugins/qopen.launcher/bin/qopen recover
+```
+
+Before replacing the catalog, QOpen preserves the current invalid file as a
+private timestamped `config.json.invalid-*` snapshot. If `--doctor` reports
+group- or world-readable state files, repair them explicitly:
+
+```bash
+~/.config/omarchy/plugins/qopen.launcher/bin/qopen fix-permissions
+```
 
 ### Development reload issues
 

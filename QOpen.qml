@@ -15,8 +15,12 @@ Item {
 
   readonly property string pluginId: (manifest && manifest.id) || "qopen.launcher"
   readonly property string pluginDir: (manifest && manifest.__sourceDir) || ""
-  readonly property string backendPath: pluginDir + "/bin/qopen"
+  readonly property string backendPath: pluginDir ? pluginDir + "/bin/qopen" : ""
   readonly property string configPath: Quickshell.env("HOME") + "/.config/qopen/config.json"
+
+  onPluginDirChanged: {
+    if (root.pluginDir) root.requestCatalogReload()
+  }
 
   property bool opened: false
   property string query: ""
@@ -26,6 +30,7 @@ Item {
   property var catalog: ({ version: 1, defaults: ({}), items: [] })
   property string configError: ""
   property string statusText: ""
+  property bool statusError: false
   property bool editorOpen: false
   property var availableGroupIds: []
   property string pendingAction: ""
@@ -34,6 +39,13 @@ Item {
   property bool pendingBrowse: false
   property string pendingSelectedId: ""
   property bool apiResponseHandled: false
+  property bool catalogResponseHandled: false
+  property bool catalogReloadPending: false
+  property bool mutationResponseHandled: false
+  property bool confirmDelete: false
+  property var deleteCandidate: null
+  property bool configMissing: false
+  property string pendingCopyText: ""
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -84,11 +96,13 @@ Item {
     root.selectedGroup = payload.favorites ? "favorites" : String(payload.group || "all")
     root.query = String(payload.query || "")
     root.statusText = ""
+    root.statusError = false
     root.editorOpen = false
     root.pendingAction = String(payload.action || "")
     root.pendingActionItemId = String(payload.item || "")
     root.pendingResourceType = String(payload.type || "")
     root.pendingBrowse = payload.browse === true
+    if (root.shell && typeof root.shell.hide === "function") root.shell.hide("omarchy.menu")
     root.opened = true
     configFile.reload()
     Qt.callLater(function() {
@@ -104,14 +118,22 @@ Item {
   function close() {
     root.opened = false
     root.editorOpen = false
+    root.confirmDelete = false
+    root.deleteCandidate = null
   }
 
   function dismiss() {
+    if (root.confirmDelete) {
+      root.cancelDelete()
+      return
+    }
     if (root.editorOpen && resourceEditor.dirty) {
       resourceEditor.requestCancel()
       return
     }
     root.opened = false
+    root.confirmDelete = false
+    root.deleteCandidate = null
     if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
   }
 
@@ -126,6 +148,12 @@ Item {
   }
 
   function ping() { return "ok" }
+
+  function showStatus(message, isError) {
+    root.statusText = String(message || "")
+    root.statusError = isError === true
+    statusTimer.restart()
+  }
 
   function titleCase(value) {
     var words = String(value || "other").replace(/[-_]+/g, " ").split(" ")
@@ -170,12 +198,49 @@ Item {
       if (!parsed || !Array.isArray(parsed.items)) throw new Error("items must be an array")
       root.catalog = parsed
       root.configError = ""
+      root.configMissing = false
       root.rebuildGroups()
       root.rebuildItems()
       root.runPendingAction()
       root.restorePendingSelection()
     } catch (e) {
       root.configError = "Cannot read config.json: " + e
+      root.configMissing = false
+      root.catalog = ({ version: 1, defaults: ({}), items: [] })
+      root.rebuildGroups()
+      root.rebuildItems()
+    }
+  }
+
+  function requestCatalogReload() {
+    if (!root.backendPath) return
+    if (catalogProcess.running) {
+      root.catalogReloadPending = true
+      return
+    }
+    root.catalogResponseHandled = false
+    catalogProcess.command = [root.backendPath, "api", "catalog"]
+    catalogProcess.running = true
+  }
+
+  function handleCatalogResponse(raw) {
+    if (root.catalogResponseHandled) return
+    root.catalogResponseHandled = true
+    if (root.catalogReloadPending) return
+    try {
+      var response = JSON.parse(String(raw || "{}"))
+      if (!response.ok) {
+        root.configError = String(response.error || "Cannot validate config.json")
+        root.configMissing = false
+        root.catalog = ({ version: 1, defaults: ({}), items: [] })
+        root.rebuildGroups()
+        root.rebuildItems()
+        return
+      }
+      root.loadConfig(JSON.stringify(response.result || ({})))
+    } catch (e) {
+      root.configError = "Invalid catalog response: " + e
+      root.configMissing = false
       root.catalog = ({ version: 1, defaults: ({}), items: [] })
       root.rebuildGroups()
       root.rebuildItems()
@@ -334,12 +399,15 @@ Item {
     if (action === "edit") {
       var item = root.findCatalogItem(itemId)
       if (!item) {
-        root.statusText = "Resource no longer exists"
-        statusTimer.restart()
+        root.showStatus("Resource no longer exists", true)
         return
       }
       root.editorOpen = true
       resourceEditor.beginEdit(item)
+      return
+    }
+    if (action === "remove") {
+      root.requestDelete(itemId)
       return
     }
     var args = [root.backendPath, action]
@@ -355,17 +423,84 @@ Item {
   }
 
   function toggleFavorite(itemId) {
-    if (!itemId || favoriteProcess.running) return
+    if (!itemId || mutationProcess.running) return
     root.statusText = "Updating favorite…"
-    favoriteProcess.command = [root.backendPath, "favorite", itemId, "toggle"]
-    favoriteProcess.running = true
+    root.statusError = false
+    root.runMutation([root.backendPath, "api", "favorite", "--id", itemId, "--mode", "toggle"])
   }
 
   function copyTarget(value) {
-    if (!value) return
-    Quickshell.execDetached(["wl-copy", value])
-    root.statusText = "Copied to clipboard"
-    statusTimer.restart()
+    if (!value || copyProcess.running) return
+    root.pendingCopyText = String(value)
+    root.statusText = "Copying to clipboard…"
+    root.statusError = false
+    copyProcess.command = ["wl-copy", "--", root.pendingCopyText]
+    copyProcess.running = true
+  }
+
+  function requestDelete(itemId) {
+    var item = root.findCatalogItem(itemId)
+    if (!item) {
+      root.showStatus("Resource no longer exists", true)
+      return
+    }
+    root.deleteCandidate = item
+    root.confirmDelete = true
+  }
+
+  function cancelDelete() {
+    root.confirmDelete = false
+    root.deleteCandidate = null
+    Qt.callLater(function() { searchField.forceActiveFocus() })
+  }
+
+  function confirmDeleteResource() {
+    if (!root.deleteCandidate || mutationProcess.running) return
+    var original = JSON.stringify(root.deleteCandidate)
+    root.statusText = "Removing resource…"
+    root.statusError = false
+    root.confirmDelete = false
+    root.runMutation([root.backendPath, "api", "delete", "--original", original])
+  }
+
+  function recoverCatalog() {
+    if (mutationProcess.running) return
+    root.statusText = "Restoring the last valid backup…"
+    root.statusError = false
+    root.runMutation([root.backendPath, "api", "recover"])
+  }
+
+  function runMutation(command) {
+    if (mutationProcess.running) return
+    root.mutationResponseHandled = false
+    mutationProcess.command = command
+    mutationProcess.running = true
+  }
+
+  function handleMutationResponse(raw) {
+    if (root.mutationResponseHandled) return
+    root.mutationResponseHandled = true
+    try {
+      var response = JSON.parse(String(raw || "{}"))
+      if (!response.ok) {
+        root.showStatus(response.error || "QOpen backend operation failed", true)
+        return
+      }
+      if (response.action === "favorite")
+        root.statusText = response.favorite === true ? "Added to favorites" : "Removed from favorites"
+      else if (response.action === "delete")
+        root.statusText = "Resource removed"
+      else if (response.action === "recover")
+        root.statusText = "Catalog restored from the last valid backup"
+      else
+        root.statusText = "Catalog updated"
+      root.deleteCandidate = null
+      configFile.reload()
+      root.statusError = false
+      statusTimer.restart()
+    } catch (e) {
+      root.showStatus("Invalid response from QOpen backend", true)
+    }
   }
 
   function saveResource(action, payload, originalPayload) {
@@ -398,6 +533,7 @@ Item {
       var warnings = Array.isArray(response.warnings) ? response.warnings : []
       root.statusText = (response.action === "create" ? "Resource added" : "Resource updated")
         + (warnings.length ? " · " + warnings[0] : "")
+      root.statusError = false
       statusTimer.restart()
       configFile.reload()
       Qt.callLater(function() { searchField.forceActiveFocus() })
@@ -414,9 +550,10 @@ Item {
     path: root.configPath
     watchChanges: true
     printErrors: false
-    onLoaded: root.loadConfig(text())
+    onLoaded: root.requestCatalogReload()
     onLoadFailed: function(error) {
       root.configError = "Config not found. Add your first resource to create it."
+      root.configMissing = true
       root.catalog = ({ version: 1, defaults: ({}), items: [] })
       root.rebuildGroups()
       root.rebuildItems()
@@ -426,10 +563,56 @@ Item {
   }
 
   Process {
-    id: favoriteProcess
+    id: catalogProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        catalogFallbackTimer.stop()
+        root.handleCatalogResponse(text)
+      }
+    }
     onExited: function(exitCode) {
-      root.statusText = exitCode === 0 ? "Favorite updated" : "Could not update favorite"
-      configFile.reload()
+      if (!root.catalogResponseHandled) catalogFallbackTimer.restart()
+      if (root.catalogReloadPending) {
+        root.catalogReloadPending = false
+        Qt.callLater(root.requestCatalogReload)
+      }
+    }
+  }
+
+  Timer {
+    id: catalogFallbackTimer
+    interval: 120
+    onTriggered: root.handleCatalogResponse('{"ok":false,"error":"QOpen catalog validation failed"}')
+  }
+
+  Process {
+    id: mutationProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        mutationFallbackTimer.stop()
+        root.handleMutationResponse(text)
+      }
+    }
+    onExited: function(exitCode) {
+      if (!root.mutationResponseHandled)
+        mutationFallbackTimer.restart()
+    }
+  }
+
+  Timer {
+    id: mutationFallbackTimer
+    interval: 120
+    onTriggered: root.handleMutationResponse('{"ok":false,"error":"QOpen backend operation failed"}')
+  }
+
+  Process {
+    id: copyProcess
+    onExited: function(exitCode) {
+      root.statusText = exitCode === 0 ? "Copied to clipboard" : "Could not copy to clipboard"
+      root.statusError = exitCode !== 0
+      root.pendingCopyText = ""
       statusTimer.restart()
     }
   }
@@ -444,7 +627,7 @@ Item {
       }
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0 && !root.apiResponseHandled)
+      if (!root.apiResponseHandled)
         apiFallbackTimer.restart()
     }
   }
@@ -457,8 +640,8 @@ Item {
 
   Timer {
     id: statusTimer
-    interval: 1800
-    onTriggered: root.statusText = ""
+    interval: 4000
+    onTriggered: { root.statusText = ""; root.statusError = false }
   }
 
   PanelWindow {
@@ -561,6 +744,13 @@ Item {
             }
 
             Keys.onPressed: function(event) {
+              if (root.confirmDelete) {
+                if (event.key === Qt.Key_Escape) root.cancelDelete()
+                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                  root.confirmDeleteResource()
+                event.accepted = true
+                return
+              }
               var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
               if (ctrl && event.key === Qt.Key_N) {
                 root.manage("add", "")
@@ -574,6 +764,7 @@ Item {
               } else if (ctrl && event.key === Qt.Key_R) {
                 configFile.reload()
                 root.statusText = "Catalog reloaded"
+                root.statusError = false
                 statusTimer.restart()
                 event.accepted = true
               } else if (event.key === Qt.Key_Down) {
@@ -996,11 +1187,37 @@ Item {
                   }
                   Text {
                     width: parent.width
-                    text: root.configError ? "Use Add to create or repair the catalog" : "Press Ctrl+N to add a resource"
+                    text: root.configError
+                      ? (root.configMissing ? "Press Ctrl+N to create your first resource"
+                        : "Restore the last valid backup or edit the raw config")
+                      : "Press Ctrl+N to add a resource"
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     horizontalAlignment: Text.AlignHCenter
+                  }
+                  Rectangle {
+                    visible: root.configError !== "" && !root.configMissing
+                    width: Style.space(176)
+                    height: Style.space(36)
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    radius: root.radius
+                    color: recoverMouse.containsMouse ? Qt.lighter(root.accent, 1.08) : root.accent
+                    Text {
+                      text: "󰑐  Restore backup"
+                      color: root.background
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      anchors.centerIn: parent
+                    }
+                    MouseArea {
+                      id: recoverMouse
+                      anchors.fill: parent
+                      enabled: !mutationProcess.running
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.recoverCatalog()
+                    }
                   }
                 }
               }
@@ -1040,7 +1257,7 @@ Item {
             text: root.statusText || (root.editorOpen
               ? "Tab move fields   Ctrl+Enter save   Esc cancel"
               : "↑↓ navigate   ↵ open   Ctrl+N add   Ctrl+E edit   Ctrl+D remove   Esc close")
-            color: root.statusText ? root.accent : root.muted
+            color: root.statusText ? (root.statusError ? Color.urgent : root.accent) : root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             anchors.left: parent.left
@@ -1056,6 +1273,66 @@ Item {
             anchors.right: parent.right
             anchors.rightMargin: Style.space(22)
             anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+      }
+    }
+
+    Rectangle {
+      visible: root.confirmDelete
+      anchors.fill: parent
+      color: Qt.rgba(root.background.r, root.background.g, root.background.b, 0.82)
+      z: 50
+      MouseArea { anchors.fill: parent; onClicked: root.cancelDelete() }
+
+      BorderSurface {
+        width: Style.space(390)
+        height: Style.space(190)
+        anchors.centerIn: parent
+        radius: root.radius
+        color: root.background
+        borderSpec: Border.surfaceSpec("menu", "border", root.borderColor, 1)
+
+        MouseArea { anchors.fill: parent; onClicked: {} }
+
+        Column {
+          anchors.fill: parent
+          anchors.margins: Style.space(22)
+          spacing: Style.space(13)
+
+          Text {
+            text: "Remove resource?"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.weight: Font.DemiBold
+          }
+          Text {
+            width: parent.width
+            text: root.deleteCandidate
+              ? "“" + String(root.deleteCandidate.name || root.deleteCandidate.id) + "” will be removed from config.json."
+              : "This resource will be removed from config.json."
+            color: root.muted
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+          Row {
+            anchors.right: parent.right
+            spacing: Style.space(8)
+            Rectangle {
+              width: Style.space(92); height: Style.space(36); radius: root.radius
+              color: cancelDeleteMouse.containsMouse ? root.subtle : "transparent"
+              border.width: 1; border.color: root.borderColor
+              Text { text: "Cancel"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.centerIn: parent }
+              MouseArea { id: cancelDeleteMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.cancelDelete() }
+            }
+            Rectangle {
+              width: Style.space(98); height: Style.space(36); radius: root.radius
+              color: confirmDeleteMouse.containsMouse ? Qt.lighter(Color.urgent, 1.08) : Color.urgent
+              Text { text: "Remove"; color: root.background; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.centerIn: parent }
+              MouseArea { id: confirmDeleteMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.confirmDeleteResource() }
+            }
           }
         }
       }

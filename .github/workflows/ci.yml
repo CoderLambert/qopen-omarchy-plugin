@@ -27,3 +27,24 @@ jobs:
 
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
+
+  qml-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Qt QML compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes qt6-declarative-dev-tools
+
+      - name: Compile QML syntax
+        run: |
+          qopen_qmlcachegen=$(find /usr/lib/qt6 -type f -name qmlcachegen -print -quit)
+          test -n "$qopen_qmlcachegen"
+          qopen_qml_output=$(mktemp -d)
+          for qopen_qml_file in QOpen.qml ResourceEditor.qml PathPicker.qml BarWidget.qml; do
+            "$qopen_qmlcachegen" --only-bytecode \
+              -o "$qopen_qml_output/$qopen_qml_file.qmlc" "$qopen_qml_file"
+          done

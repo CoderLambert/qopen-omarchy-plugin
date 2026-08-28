@@ -1,4 +1,4 @@
-# QOpen 2.3 Design
+# QOpen 2.4 Design
 
 ## Product boundary
 
@@ -29,8 +29,9 @@ bin/qopen
 ```
 
 The split is deliberate. QML is responsible for presentation, search and
-navigation. Python is responsible for persistence and execution. Resource
-values are never interpolated into a shell command by QML.
+navigation. Python is responsible for catalog reads, schema validation,
+persistence and execution. Resource values are never interpolated into a shell
+command by QML.
 
 ## Interaction model
 
@@ -85,12 +86,18 @@ Supported item types are `web`, `file`, `project`, `tui`, `command` and
 - A file lock serializes mutations.
 - Writes go to a same-directory temporary file and use atomic replacement.
 - The previous catalog is copied to `config.json.bak` before mutation.
+- Backups are validated before recovery, and the replaced invalid catalog is
+  retained as a private timestamped snapshot.
+- New state files use mode `0600`; `doctor` audits permissions and repair is
+  explicit.
 - The complete schema is validated before every write.
-- Commands are represented as argument arrays.
+- Commands are represented as argument arrays and use lossless POSIX quoting
+  when displayed for editing.
 - File and project paths expand `~` and environment variables only in the
   backend.
 - Directory browsing is read-only, bounded to 1000 entries and does not create
-  file-system monitors.
+  file-system monitors. Request ids prevent stale directory responses from
+  replacing newer navigation state.
 - Destructive removal always asks for confirmation.
 
 ## Integration
