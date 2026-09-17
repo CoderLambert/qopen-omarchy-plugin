@@ -15,9 +15,10 @@ Item {
   property var pluginRegistry: null
 
   readonly property string pluginId: (manifest && manifest.id) || "qopen.launcher"
-  // omarchy >= 4.0.4 hands third-party plugins a sanitized manifest without
-  // __sourceDir. Recover the plugin directory from the own entry point URL
-  // (file:///.../qopen.launcher/QOpen.qml -> .../qopen.launcher) instead.
+  // omarchy >= 4.0.3 hands third-party plugins a sanitized manifest without
+  // __sourceDir. Recover the plugin directory from the own entry point URL.
+  // Strip the full manifest entry-point path so this keeps working if the
+  // entry point later moves below the plugin root (for example ui/QOpen.qml).
   readonly property string pluginDir: {
     if (manifest && manifest.__sourceDir) return String(manifest.__sourceDir)
     var entryUrl = ""
@@ -28,7 +29,21 @@ Item {
         entryUrl = ""
       }
     }
-    if (!entryUrl) return ""
+    if (!entryUrl || entryUrl.indexOf("file://") !== 0) return ""
+
+    var entryPoint = manifest && manifest.entryPoints
+      ? String(manifest.entryPoints.menu || "") : ""
+    if (entryPoint) {
+      var encodedEntryPoint = entryPoint.split("/").map(encodeURIComponent).join("/")
+      var suffix = "/" + encodedEntryPoint
+      if (entryUrl.slice(-suffix.length) === suffix) {
+        var rootUrl = entryUrl.slice(0, -suffix.length)
+        try { return decodeURIComponent(rootUrl.slice("file://".length)) }
+        catch (e) { return "" }
+      }
+    }
+
+    // Compatibility fallback if a host ever hides entryPoints as well.
     var path = entryUrl.replace(/^file:\/\//, "")
     var slash = path.lastIndexOf("/")
     if (slash < 0) return ""
