@@ -4,14 +4,22 @@ All notable user-facing changes to QOpen are documented here.
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-09-18
+
 ### Fixed
 
-- Recovered the plugin directory from the plugin's own entry point URL when
-  Omarchy 4.0.3+ strips `__sourceDir` from third-party manifests, restoring the
-  catalog on shells that sanitize plugin manifests.
-- Derived the fallback plugin root by removing the complete menu entry-point
-  path, so backend lookup remains correct if the entry point moves into a
-  subdirectory.
+- Restored catalog loading on Omarchy versions that sanitize third-party
+  plugin manifests and no longer expose the internal `__sourceDir` field.
+- Resolved the plugin directory through Omarchy's scoped
+  `pluginRegistry.entryPointUrl(...)` API when `__sourceDir` is unavailable,
+  keeping the old manifest path for backward compatibility.
+- Stripped the complete menu entry-point path when deriving the plugin root,
+  so backend lookup stays correct if the QML entry point later moves into a
+  subdirectory such as `ui/QOpen.qml`.
+- Rejected non-`file://` entry-point URLs when deriving the local backend
+  path.
+- Required no migration or replacement of `~/.config/qopen/config.json`;
+  the personal catalog remains untouched by plugin updates.
 
 ## [2.5.1] - 2026-08-28
 
