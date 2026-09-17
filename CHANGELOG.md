@@ -2,6 +2,14 @@
 
 All notable user-facing changes to QOpen are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Recovered the plugin directory from the plugin's own entry point URL when
+  omarchy 4.0.4+ strips `__sourceDir` from third-party manifests, restoring the
+  catalog on shells that sanitize plugin manifests.
+
 ## [2.5.1] - 2026-08-28
 
 ### Security

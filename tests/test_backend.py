@@ -399,6 +399,14 @@ class QOpenBackendTests(unittest.TestCase):
         self.assertIn("if (root.pluginDir) root.requestCatalogReload()", qopen_source)
         self.assertNotIn('readonly property string backendPath: pluginDir + "/bin/qopen"', qopen_source)
 
+    def test_plugin_directory_falls_back_to_entry_point_url_when_manifest_strips_source_dir(self) -> None:
+        qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
+
+        self.assertIn('return String(manifest.__sourceDir)', qopen_source)
+        self.assertIn('pluginRegistry.entryPointUrl(manifest, "menu")', qopen_source)
+        self.assertIn('entryUrl.replace(/^file:\\/\\//, "")', qopen_source)
+        self.assertIn('decodeURIComponent(path.slice(0, slash))', qopen_source)
+
     def test_missing_catalog_requests_first_run_initialization(self) -> None:
         qopen_source = (REPOSITORY / "QOpen.qml").read_text(encoding="utf-8")
 
