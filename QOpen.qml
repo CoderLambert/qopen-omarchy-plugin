@@ -12,9 +12,29 @@ Item {
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   property var shell: null
   property var manifest: null
+  property var pluginRegistry: null
 
   readonly property string pluginId: (manifest && manifest.id) || "qopen.launcher"
-  readonly property string pluginDir: (manifest && manifest.__sourceDir) || ""
+  // omarchy >= 4.0.4 hands third-party plugins a sanitized manifest without
+  // __sourceDir. Recover the plugin directory from the own entry point URL
+  // (file:///.../qopen.launcher/QOpen.qml -> .../qopen.launcher) instead.
+  readonly property string pluginDir: {
+    if (manifest && manifest.__sourceDir) return String(manifest.__sourceDir)
+    var entryUrl = ""
+    if (pluginRegistry) {
+      try {
+        entryUrl = String(pluginRegistry.entryPointUrl(manifest, "menu") || "")
+      } catch (e) {
+        entryUrl = ""
+      }
+    }
+    if (!entryUrl) return ""
+    var path = entryUrl.replace(/^file:\/\//, "")
+    var slash = path.lastIndexOf("/")
+    if (slash < 0) return ""
+    try { return decodeURIComponent(path.slice(0, slash)) }
+    catch (e) { return path.slice(0, slash) }
+  }
   readonly property string backendPath: pluginDir ? pluginDir + "/bin/qopen" : ""
 
   onPluginDirChanged: {
