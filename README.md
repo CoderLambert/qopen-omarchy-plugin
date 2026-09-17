@@ -12,7 +12,7 @@ regrouped or removed by you.
 > 而是把项目目录、文件、常用文档、前端生态网站、TUI、命令和 SSH 目标集中到
 > 一个支持搜索、分组、收藏与原生编辑的界面中。
 
-Current release: **2.5.1**
+Current release: **2.5.2**
 
 **Documentation:** [简体中文](README.zh-CN.md) · [Development record](DEVELOPMENT.md)
 
