@@ -7,8 +7,11 @@ All notable user-facing changes to QOpen are documented here.
 ### Fixed
 
 - Recovered the plugin directory from the plugin's own entry point URL when
-  omarchy 4.0.4+ strips `__sourceDir` from third-party manifests, restoring the
+  Omarchy 4.0.3+ strips `__sourceDir` from third-party manifests, restoring the
   catalog on shells that sanitize plugin manifests.
+- Derived the fallback plugin root by removing the complete menu entry-point
+  path, so backend lookup remains correct if the entry point moves into a
+  subdirectory.
 
 ## [2.5.1] - 2026-08-28
 
